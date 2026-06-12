@@ -1,6 +1,13 @@
 ---
 name: Anti-Slop
 description: Flag AI-generated slop and low-effort filler in the diff
+hints:
+  - Use when a change looks AI-assisted, unusually verbose, abstraction-heavy, or filled with explanatory comments.
+  - large generated-looking diff
+  - comment-heavy changes
+  - new wrappers or abstractions
+  - repeated near-duplicate code
+  - assistant-style prose
 ---
 
 Review the diff for "AI slop" — low-signal filler that bloats the code without adding

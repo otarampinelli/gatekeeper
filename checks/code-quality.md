@@ -1,6 +1,13 @@
 ---
 name: Code Quality
 description: Flag obvious code-quality problems in the diff
+hints:
+  - Use when a code change adds or reshapes implementation logic and you want a general quality pass.
+  - refactors
+  - new helpers or utilities
+  - control-flow changes
+  - debugging leftovers
+  - dead code
 ---
 
 Review the diff for code-quality problems. Fail the check if any of these are true:

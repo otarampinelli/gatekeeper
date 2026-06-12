@@ -9,9 +9,9 @@
  ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚══════╝╚══════╝╚═╝     ╚══════╝╚═╝  ╚═╝
 ```
 
-**🛡️ AI code review that runs locally, in the agent you already use.**
+**🛡️ AI code review for local changes and GitHub PRs, in the agent you already use.**
 
-Define checks as markdown. Run them on your changes with `/gatekeeper`. No API key, no CI, no extra service.
+Define checks as markdown. Run them on your changes or a PR with `/gatekeeper`. No API key, no CI, no extra service.
 
 </div>
 
@@ -21,12 +21,11 @@ Define checks as markdown. Run them on your changes with `/gatekeeper`. No API k
 
 Gatekeeper is a tiny, tool-agnostic code-review runner. A **check** is just a markdown
 file with a prompt. When you type `/gatekeeper`, your coding agent reads your local
-changes, runs every check against them in parallel, and shows you pass/fail with
-ready-to-apply fixes — right before you push.
+changes (or a GitHub PR), runs every check against them in parallel, and shows you
+pass/fail with ready-to-apply fixes — right before you push, or as inline PR comments.
 
 It piggybacks on the AI agent you already have (**Claude Code**, **Cursor**, and any
-tool that reads the skills convention), so
-there's nothing extra to configure.
+tool that reads the skills convention), so there's nothing extra to configure.
 
 ## Install
 
@@ -40,16 +39,35 @@ That drops the `gatekeeper` skill into your tool's skills folder (`.agents/skill
 
 ## Use it
 
+**Review local changes:**
 ```
 /gatekeeper
 ```
 
-Gatekeeper will:
+**Review a GitHub PR:**
+```
+/gatekeeper https://github.com/org/repo/pull/123
+```
+
+**Run a specific check only:**
+```
+/gatekeeper security-review
+/gatekeeper security-review https://github.com/org/repo/pull/123
+```
+
+**Local mode** — Gatekeeper will:
 
 1. Snapshot your changes — committed, staged, unstaged, **and brand-new files**.
 2. Run every `.gatekeeper/checks/*.md` in an isolated sub-agent, in parallel.
 3. Print a summary of findings (deduplicated across checks).
 4. Walk you through each finding with a colored diff and a **Fix it / Skip** choice.
+
+**PR mode** — Gatekeeper will:
+
+1. Fetch the PR diff and commit log via the GitHub CLI (`gh`).
+2. Run every check in parallel.
+3. Print a summary of findings.
+4. Preview planned inline PR comments, then ask whether to post them.
 
 ## Writing checks
 
@@ -59,6 +77,10 @@ A check is a markdown file in `.gatekeeper/checks/`. Frontmatter + a prompt:
 ---
 name: Security Review
 description: Flag security issues in the diff
+hints:
+  - Use when a change touches auth, permissions, or external input handling.
+  - new endpoints
+  - secrets or sensitive logging
 ---
 
 Review the diff. Fail the check if any of these are true:
@@ -75,6 +97,7 @@ If none are found, pass the check.
 |-------|----------|---------|
 | `name` | ✅ | Shown in the results |
 | `description` | ✅ | Short summary of what it checks |
+| `hints` | — | Keywords/phrases that help the runner decide when to recommend this check |
 | _body_ | ✅ | The prompt applied to your diff |
 
 > One concern per check. A check that tries to cover security *and* test coverage *and*
@@ -117,13 +140,13 @@ The installed skill folder is not the same as a project's `.gatekeeper/` folder:
 
 ## How it works
 
-- **Local only.** Your diff never leaves your machine; it's reviewed by the agent you're
-  already running.
+- **Two modes.** Local mode reviews your working tree; PR mode fetches the diff from
+  GitHub via the `gh` CLI and posts findings back as inline comments.
 - **Isolated checks.** Each check runs in its own sub-agent, so one check's reasoning
   never bleeds into another's verdict.
-- **Reviews real changes.** Uses `git diff` against your base branch (`main`/`master`)
-  plus intent-to-add, so it catches everything you're about to push — including
-  untracked files.
+- **Reviews real changes.** In local mode, uses `git diff` against your base branch
+  (`main`/`master`) plus intent-to-add, so it catches everything you're about to push —
+  including untracked files.
 - **Tool-agnostic.** The same `SKILL.md` works in any agent that follows the `skills`
   convention.
 
