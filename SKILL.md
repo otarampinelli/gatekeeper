@@ -1,315 +1,258 @@
 ---
 name: gatekeeper
-description: Runs review checks from .gatekeeper/checks against either local changes or a GitHub PR, summarizes results, fixes local findings by triage, and previews/posts inline comments for PR reviews. Use when the user says "/gatekeeper", "run gatekeeper", or "run the checks" before pushing or when reviewing a PR.
+description: Runs review checks from .gatekeeper/checks against either local changes or a GitHub PR, gathers deterministic evidence, verifies every candidate finding before reporting it, then fixes local findings by triage or previews/posts inline PR comments. Use when the user says "/gatekeeper", "run gatekeeper", or "run the checks" before pushing or when reviewing a PR.
 ---
 
-# Gatekeeper — Check Runner
+# Gatekeeper - Check Runner
 
-Run every `.gatekeeper/checks/*.md` check against the selected review source. Each check
-is judged by its own isolated sub-agent, in parallel, so one check's reasoning
-never influences another's verdict.
+Review a change against `.gatekeeper/checks/*.md`, in one of exactly two modes:
 
-This skill is the runner. The repo's review policy lives in the check files.
+- **local** — the user's uncommitted and unpushed work, reviewed so they can fix it before pushing.
+- **PR** — someone's pull request, reviewed as a tagged reviewer would: inline comments on the PR, nothing edited locally.
 
-Keep the runner generic and keep repo-specific rules inside `.gatekeeper/checks/*.md`.
+Gatekeeper is a hybrid: a deterministic engine does the mechanical work, and you do the
+judgment. Stay on your side of that line.
 
-## Workflow
+| The `gk` engine owns | You own |
+|---|---|
+| base pinning, diff capture, PR worktree | inferring intent, recommending checks |
+| manifest, churn, renames, declarations | the reviews themselves (sub-agents) |
+| `applies_to` gating, grouping checks into agents | verification reasoning (sub-agents) |
+| running analyzers, reading CI, caching | merging near-duplicate findings |
+| neighborhood/reference mapping | triage conversation, comment prose |
+| filling in every agent prompt | |
+| parsing, dedupe, ranking, dismissals, state | |
+
+**Never reimplement an engine stage by hand.** Do not build the diff with shell commands,
+do not hand-write the manifest, do not retype an agent prompt, do not eyeball whether a
+finding was dismissed before. If a `gk` command fails, report the error — do not improvise
+a replacement. The engine exists so these answers are identical every run and cost no
+context.
+
+## The engine
+
+`.gatekeeper/bin/gk.mjs` — zero dependencies, plain node. Every command prints compact JSON
+to stdout and writes bulk artifacts to disk. Read the artifacts only when you need a
+specific detail; hand their paths to sub-agents instead.
+
+```bash
+node .gatekeeper/bin/gk.mjs help
+```
+
+Commands: `prepare`, `context`, `parse`, `rank`, `dismiss`, `cleanup`.
+
+Run state lives in `<git-common-dir>/gatekeeper/` — inside `.git`, so it is never
+committed. `dismissals.json` and `cache/` persist across runs; `runs/<id>/` holds one
+review pass.
+
+The engine's pure functions are tested. If you change one, run them:
+
+```bash
+node --test '.gatekeeper/test/*.test.mjs'
+```
+
+## Flags
+
+- `--deep` — also run analyzers marked `deep: true` (slow ones: full typechecks, tests)
+- `--no-verify` — skip verification (faster, noisier; the summary says so)
+- `--fresh` — ignore previously dismissed findings
+
+---
 
 ### 1. Choose review source
 
-This runner supports two input modes:
-
-- local changes in the current repo
-- a GitHub PR link
-
-If the user provides a GitHub PR URL, review that PR instead of the local working tree.
-
-GitHub PR mode requires the GitHub CLI.
-
-Before using PR mode:
-
-1. verify `gh` is installed
-2. verify `gh` is authenticated and can access the PR
-
-If either check fails, stop and tell the user what is missing.
-
-Do not try to install `gh` for the user. Ask them to install it first.
+- no argument -> local changes
+- a GitHub PR URL or number -> that PR, in an isolated worktree
 
 Examples:
 
-- `/gatekeeper` -> review local changes
-- `/gatekeeper security-review` -> review local changes with one check
-- `/gatekeeper https://github.com/org/repo/pull/123` -> review that PR with all checks
-- `/gatekeeper security-review https://github.com/org/repo/pull/123` -> review that PR with one check
+- `/gatekeeper` -> local changes, all applicable checks
+- `/gatekeeper security-review` -> local changes, one check
+- `/gatekeeper https://github.com/org/repo/pull/123` -> that PR
+- `/gatekeeper security-review 123` -> one check against PR 123
 
-### 2. Gather context (write to disk, NOT into your context)
+### 2. Prepare
 
-Prepare two temp files for the checks:
+```bash
+node .gatekeeper/bin/gk.mjs prepare              # local
+node .gatekeeper/bin/gk.mjs prepare --pr <url>   # PR
+```
 
-- `/tmp/gatekeeper-diff.patch`
-- `/tmp/gatekeeper-log.txt`
+This one command pins the base to the merge-base, captures the excluded diff, builds the
+manifest, gates checks by `applies_to`, and groups the survivors into agents. In PR mode it
+also verifies `gh`, fetches the PR head, and creates a detached worktree so the user's
+checkout is never touched.
 
-Run these as **discrete, simple commands** (not one giant chained one-liner) so they
-can be safely added to each agent's allowlist and won't trigger a fresh permission
-prompt every run.
+Keep `runDir` from the output — every later command needs `--run <runDir>`.
 
-For local changes:
+If `empty: true`, tell the user there is nothing to review and stop.
 
-1. Make untracked (new) files visible to git diff. Plain `git diff` only shows tracked
-   files, so brand-new files would be skipped. Intent-to-add makes them appear as
-   additions without staging their content:
-   `git add -N .`
-2. Write the diff to `/tmp/gatekeeper-diff.patch`, capping it at 3000 lines in the
-   SAME command by piping straight into `head` (do NOT write the file then truncate
-   it afterwards — that needs a rewrite step and tempts you into python/awk). Review
-   EVERYTHING that differs — committed, staged, unstaged, AND new files. Try these in
-   order (use `master` if there is no `main` branch), stopping at the first whose
-   output file is non-empty:
-   - `git diff main | head -3000 > /tmp/gatekeeper-diff.patch`
-   - if empty: `git diff HEAD | head -3000 > /tmp/gatekeeper-diff.patch`
-   - if empty: `git diff | head -3000 > /tmp/gatekeeper-diff.patch`
-   These are plain shell pipes — never reach for python, awk, or sed to build,
-   truncate, or post-process the file.
-3. Write the commit log: `git log main..HEAD --oneline > /tmp/gatekeeper-log.txt`.
-   If `main` does not exist, use `git log HEAD --oneline > /tmp/gatekeeper-log.txt`.
+If it reports an error, relay it and stop. Missing or unauthenticated `gh` is the user's
+to fix; never try to install it.
 
-For GitHub PR mode:
+Tell the user what it found — file count, the checks that will run, how many agents that
+is, and how many checks were gated out. In PR mode mention that a worktree is being
+created, since it takes a moment on a large repo.
 
-1. Write the PR diff:
-   `gh pr diff <pr-url> > /tmp/gatekeeper-diff.patch`
-2. Write a concise commit log for the PR:
-   `gh pr view <pr-url> --json commits --template '{{range .commits}}{{printf "%.7s %s\n" .oid .messageHeadline}}{{end}}' > /tmp/gatekeeper-log.txt`
+**If `wide: true`, stop and ask before running everything.** The patch is large enough that
+the full check set is expensive no matter how it is grouped, and `applies_to` cannot help:
+a sweep that touches every path gates in every check. Report `patchTokens`, say plainly
+that a full review is not worth it at this size, and ask which checks matter. Proceed with
+the full set only if the user says so.
 
-If every diff is empty, tell the user there are no changes to review and stop.
+### 3. Recommend checks (your judgment)
 
-**Do NOT read these files back into your own context.** The sub-agents read them directly.
+Skip this entirely if the user named specific checks — run exactly those.
 
-### 3. Infer intent and recommend checks
+Otherwise read `manifest.md` from the run directory. Use the manifest, not the raw diff:
+it already separates moves and reindents from real behavior change, and reading the patch
+here wastes context you will need later.
 
-Only do this step if the user did not explicitly name which checks to run.
+Produce:
 
-If the user specifies one or more checks, skip intent inference and run the requested
-checks.
+1. a one-line summary of the likely intent
+2. the smallest set of the already-gated checks that clearly matches
+3. confidence: narrow, mixed, or unclear
 
-Otherwise, do a lightweight intent pass over:
+Build this from each check's `name`, `description`, and `hints` as reported by `prepare`.
+Never hardcode a mapping — checks get added and renamed.
 
-- the changed paths
-- the diff
-- the commit log
-
-Use that pass to produce:
-
-1. a short summary of the likely change intent
-2. a recommendation for which checks to run
-3. a confidence judgment: narrow, mixed, or unclear
-
-This is a recommendation layer, not a strict policy layer.
-
-Do not assume the model fully understands the PR. Use intent to narrow obvious cases,
-but widen coverage when the change is broad or ambiguous.
-
-Use the intent pass to recommend checks from the currently available check files.
-
-Do not hardcode the recommendation logic to a fixed set of check names. Checks may be
-added, removed, or renamed over time.
-
-To build a recommendation:
-
-1. discover the available checks in `.gatekeeper/checks/*.md`
-2. read each check's `name` and `description`; use optional recommendation metadata if it
-   exists, but do not require it
-3. compare the inferred intent and changed paths to the available checks
-4. recommend the smallest reasonable set of checks that clearly matches the change
-5. if the match is weak, the change is mixed-purpose, or the change is sprawling, run
-   all checks
-
-Prefer recommendation logic that is driven by the check files themselves, not by a
-fixed mapping embedded in the runner.
-
-If the intent looks narrow and the recommendation is high confidence, it is fine to
-recommend a subset of the currently available checks instead of all checks.
-
-If the change looks mixed-purpose, sprawling, or hard to classify, recommend all checks.
-
-Always print the recommendation before running checks. Example:
+Widen to every gated-in check when the change is mixed-purpose, sprawling, or hard to
+classify. `applies_to` already removed what cannot possibly apply, so the remaining set is
+a safe default — unless `wide: true`, where it is not.
 
 ```text
-Likely intent: add input validation to the user registration endpoint.
-Recommended checks: Security Review, Test Coverage.
+Likely intent: new form validation on the checkout page.
+Gated out: 9 checks (no matching paths).
+Recommended: UI / Component Placement, Test Coverage, Simplicity.
 Confidence: narrow.
 ```
 
-### 4. Decide scope
+If a requested check does not exist, list what is available and stop. If a name is
+ambiguous, ask.
 
-If the user explicitly asks for specific checks, run only those checks and skip the
-recommendation layer.
+### 4. Gather context
 
-Otherwise, use the recommended checks from the intent pass.
-
-If there is no clear recommendation, or the change is mixed or unclear, run every check
-in `.gatekeeper/checks/*.md`.
-
-Accept either:
-
-- the filename stem, for example `security-review`
-- the derived display name, for example `Security Review`
-- a clear partial match when it is unambiguous, for example `security`
-
-If a requested name matches more than one check, ask the user which one they want.
-
-If a requested check does not exist, tell the user which checks are available and stop.
-
-Examples:
-
-- `/gatekeeper` -> run all checks
-- `/gatekeeper security-review` -> run only `.gatekeeper/checks/security-review.md`
-- `run gatekeeper for Security Review` -> run only `.gatekeeper/checks/security-review.md`
-
-### 5. Discover checks
-
-- Discover check files with a bash command, NOT the Glob tool — `.gatekeeper/` is a
-  hidden directory and Glob skips dotfolders. Use:
-  `ls .gatekeeper/checks/*.md` (or `find .gatekeeper/checks -maxdepth 1 -name '*.md'`).
-- **Do NOT read the check files.** Just take the filename and derive a display name
-  (e.g. `security-review.md` -> "Security Review").
-- **First-run bootstrap.** If `.gatekeeper/checks/` is missing or empty, the project
-  has never been set up. Don't error out — offer to scaffold it. This skill ships
-  default templates in `checks/` next to THIS `SKILL.md`.
-  To bootstrap:
-  1. Locate this skill's own directory (the folder containing the SKILL.md you're
-     reading) and its `checks/` subfolder.
-  2. Ask the user (AskUserQuestion) whether to copy those templates into
-     `.gatekeeper/checks/`. On yes: `mkdir -p .gatekeeper/checks` then copy
-     `checks/*.md` into it. On no: stop and tell them to add their own
-     `.gatekeeper/checks/*.md`.
-- After bootstrapping, re-run discovery and continue.
-- Before running anything, print the checks that will run.
-
-### 6. Run checks in parallel (background sub-agents)
-
-For each check file, spawn a sub-agent with:
-- `subagent_type: "general-purpose"`
-- `run_in_background: true`
-
-Use this prompt structure:
-
-```
-You are a code reviewer running an automated check on a set of changes.
-
-## Setup
-1. Read your check instructions from: {absolute path to .gatekeeper/checks/xxx.md}
-2. Read the diff from: /tmp/gatekeeper-diff.patch
-3. Read the commit log from: /tmp/gatekeeper-log.txt
-
-## Your Task
-Review the diff according to your check instructions. Only judge the changed
-lines. Work from the diff alone — do NOT open or read other files just to build
-your answer (that slows the check down). Do not flag pre-existing issues in
-unchanged code. For each finding provide:
-1. Severity (Error / Warning / Info)
-2. The specific file and line from the diff
-3. A short explanation of what's wrong and how to fix it, in prose. You may quote
-   the offending line and state the replacement inline (e.g. "change
-   `password: '1223456789'` to read from `process.env.PG_PASSWORD`"), but do NOT
-   construct a full ```diff block — the main runner does that later, only for the
-   findings the user chooses to fix.
-
-If everything looks good and you have no findings, say "PASS" and briefly explain
-why the changes are clean for your check.
-
-If you have findings, say "FAIL" and list them.
-
-Keep your response concise. Do not repeat the whole diff back. Your final message
-must start with either "PASS" or "FAIL" on its own line.
+```bash
+node .gatekeeper/bin/gk.mjs context --run <runDir> [--checks a,b] [--deep]
 ```
 
-Launch ALL sub-agents in a single message (all Agent tool calls together).
+Pass `--checks` with the stems you settled on in step 3; omit it to cover everything
+`prepare` gated in. This runs `.gatekeeper/analyzers.mjs` from the review root, caches each
+analyzer against its own input file hashes, maps who references the changed exported
+symbols, and writes one ready-to-use review prompt per agent into `prompts/`. It fails
+soft — a timeout or crash becomes `skipped` with a reason, never an aborted review.
 
-### 7. Collect results & deduplicate
+Two things in the `neighborhood` block are worth surfacing to the user, because they are
+signals no agent needs to hunt for:
 
-After all agents complete, read just the last 30 lines of each output file:
-`tail -30 {output_file}`. Parse PASS/FAIL and extract each finding (file, line,
-problem, code suggestion).
+- `orphanSymbols` — exported symbols with no references anywhere
+- `filesWithoutTests` — changed source files whose symbols appear in no test
 
-**Deduplicate findings.** Different checks often flag the *same* underlying problem
-(e.g. both Security Review and Code Quality flag the same hardcoded password at
-`database.ts:12`). Merge findings that point to the **same file + line + root
-issue** into ONE finding. Record which checks flagged it (e.g. "flagged by Security
-Review + Code Quality") and keep a single code suggestion. Do not merge findings
-that are genuinely different problems, even in the same file.
+In PR mode `context` also reads the check runs attached to the reviewed commit. Those are
+the same jobs the `needsInstall: true` analyzers would run, already executed against this
+exact commit, so those analyzers skip with CI named as their covering source. A fresh
+worktree has no `node_modules`; never install dependencies to change that, and never
+describe a skipped analyzer as passing.
 
-### 8. Summarize results (ALWAYS — before any triage)
+Surface the `ci` block (PR mode only — absent from `context`'s output for local review).
+Three things in it change what the review means:
 
-You MUST print this summary table before doing anything else. Do not rely on the
-sub-agents' "Done" status — a completed sub-agent does NOT mean the check passed.
-The only source of truth is the PASS/FAIL line in each agent's output.
+- `note` — the PR targets something other than the default branch, so workflows gated to
+  that branch never fired and the board is thin by construction. Tell the user: a
+  three-job board is not a green one.
+- `failed` — the failing output is already in `evidence.md`; mention it before the agents
+  run, since it usually reframes what the review is about.
+- pending jobs, which land in the `skipped` count — still running is not passing.
 
-List **one row per deduplicated finding**. A finding flagged by multiple checks gets
-ONE row listing those checks. A check that passed cleanly gets a single ✅ row.
+### 5. Run the checks (sub-agents produce candidates)
 
+`context` returned an `agents` array. Spawn one sub-agent per entry,
+`subagent_type: "general-purpose"`, `run_in_background: true`, **all in a single message**.
+
+Each agent's prompt is already written and fully substituted. Read the file and pass its
+contents as the prompt — do not compose one yourself, and do not edit it.
+
+```text
+Read this file and follow it exactly: <agents[i].prompt>
 ```
-🛡️  Gatekeeper — N checks
 
-| Finding                                   | Flagged by                  |
-|-------------------------------------------|-----------------------------|
-| ❌ Hardcoded DB password — database.ts:12   | Security Review, Code Quality |
-| ❌ Unused import — utils.ts:33              | Code Quality                  |
-| ✅ Test Coverage — passed                  | Test Coverage               |
+An agent may carry several checks. That is deliberate: the checks with no `applies_to`
+survive gating on every review and each read the whole patch, so one agent per check meant
+paying many times over for the same bytes. The prompt tells the agent to keep each check's
+result in its own file, and every finding is still verified independently.
 
-X findings across Y checks.
+Agents write to `<runDir>/candidates/` and return `DONE`, so their output never passes
+through your context.
+
+### 6. Parse
+
+```bash
+node .gatekeeper/bin/gk.mjs parse --run <runDir>
 ```
 
-If every check passed, say so explicitly and stop — there is nothing to triage.
+Aggregates every candidate file, merges exact duplicates across checks, unions their
+evidence, escalates to the highest severity, assigns stable ids (`F01`, `F02`), and writes
+batched verification prompts. Parsing is lenient — a malformed finding degrades rather than
+disappearing.
 
-### 9. External PR review follow-up (GitHub PR mode only)
+Two fields need your judgment:
 
-Only do this step when the review source is a GitHub PR URL and something failed.
+- `possibleDuplicates` — same file and line, different titles. The engine will not merge
+  these because collapsing two genuinely different problems is worse than showing both.
+  Decide, and say what you merged.
+- `alreadyDismissed` — the user declined this before. Still verify it; `rank` handles the
+  suppression.
 
-GitHub PR mode is an external review flow. Treat the PR as someone else's work by
-default: do not check out the PR branch, do not offer to fix locally, and do not show
-the per-finding "Fix it" / "Skip" triage cards.
+If `reports: 0`, the agents wrote nothing. Say so rather than reporting a clean pass.
 
-After printing the required Gatekeeper summary, generate planned inline PR comments
-for every finding that can be anchored to changed lines in the PR diff. Then render
-the exact planned comments in chat and ask whether to post them. In PR mode, the
-default flow is:
+### 7. Verify (sub-agents, adversarial)
 
-1. run the checks
-2. print the Gatekeeper summary
-3. build and render planned Gatekeeper-labeled inline PR comments
-4. ask whether to post all comments, choose comments, or stop
+Skip only with `--no-verify`.
 
-AskUserQuestion options:
+This is what makes the review trustworthy. Generation and verification must stay separate:
+an agent that just argued for a finding is the wrong one to judge it. Cost scales with
+findings, not with checks or repo size, so this is cheap next to step 5.
 
-- **Post all inline PR comments** — post every planned comment exactly as previewed
-- **Choose comments** — ask once with one checkbox option per planned comment, then
-  post only the selected comments
+`parse` returned a `verifyAgents` array. Spawn one sub-agent per entry, all in a single
+message, passing each prompt file the same way as step 5. Each agent writes one
+`<runDir>/verdicts/<id>.txt` per finding it was given.
+
+An unparseable verdict is treated as UNPROVEN, never CONFIRMED — the engine fails closed.
+
+### 8. Rank and summarize
+
+```bash
+node .gatekeeper/bin/gk.mjs rank --run <runDir> [--no-verify] [--fresh]
+```
+
+Applies the reporting gate deterministically: `CONFIRMED` reports; `UNPROVEN` Error reports
+labeled unproven; `REJECTED`, low-severity `UNPROVEN`, and dismissed findings suppress.
+
+**Print the returned `summary` verbatim, before any triage.** It already carries the
+suppression tally, the evidence line, and the churn note. A verification layer that
+silently swallows findings is indistinguishable from a broken one, so never hide the
+tally.
+
+If nothing is reported, say so plainly and go to step 10.
+
+### 9. Report
+
+#### 9a. GitHub PR mode
+
+PR mode is an external review. Treat the PR as someone else's work: never offer to fix it
+locally, never show the per-finding "Fix it" / "Skip" cards.
+
+Build planned inline comments from `reported.json` for every finding that anchors to a
+changed line, render them exactly as they will be posted, then ask:
+
+- **Post all inline PR comments** — post every planned comment as previewed
+- **Choose comments** — one checkbox per comment, post only those
 - **Stop** — leave the PR untouched
 
-Do not post a top-level PR summary comment.
-
-Only post inline comments when the finding can be anchored to a changed line in the PR
-diff. If a finding cannot be anchored safely, do not create a top-level fallback
-comment; report the unposted finding in chat after posting the anchored comments.
-
-Each inline comment body must clearly mark that it came from Gatekeeper. Keep the
-visible comment concise.
-
-For code-related findings, always explain what the problem is and how to solve it in
-prose. Before rendering the planned inline comments, attempt to build a small `diff`
-code block from the changed line or contiguous changed lines for every code-related
-finding. If the fix is local and mechanical (delete a line, replace an expression,
-remove a no-op block, swap an unsafe call for a safer call, etc.), the planned comment
-must include the diff block inside a `<details>` section with
-`<summary>Proposed fix</summary>`. If the fix is not local to the commented line
-(for example, adding a new test file, wiring configuration elsewhere, or a broader
-design change), still post the inline comment with the problem and prose fix guidance;
-omit the `<details>` section.
-
-For non-code findings, do not add a suggested-fix `<details>` section. Put any
-recommendation in concise visible prose instead.
-
-Code-related inline comment example:
+No top-level summary comment. Only post comments that anchor to a changed line; report
+unanchorable findings in chat. Build diff blocks from the finding's stored `diff` — do not
+re-read files.
 
 ````markdown
 🛡️ **Gatekeeper** flagged this via `<check name>`.
@@ -318,180 +261,133 @@ Code-related inline comment example:
 
 <one concise explanation of the problem>
 
+<the evidence line verification confirmed>
+
 Suggested fix: <one concise explanation of how to solve it>
 
 <details>
 <summary>Proposed fix</summary>
 
 ```diff
-<minimal context>
 - <old code>
 + <new code>
-<minimal context>
 ```
 
 </details>
 ````
 
-Non-code inline comment example:
-
-```markdown
-🛡️ **Gatekeeper** flagged this via `<check name>`.
-
-**<short finding title>**
-
-<one concise explanation of the problem>
-
-Suggested fix: <one concise prose fix>
-```
-
-To post inline comments, use the GitHub pull request review comments API via `gh api`.
-Resolve the PR number and head commit first:
+Design and non-code findings use the same body without the `<details>` block.
 
 ```bash
 gh pr view <pr-url> --json number,headRefOid
 ```
 
-Then post each anchored finding:
-
-````bash
+```bash
 gh api repos/<owner>/<repo>/pulls/<number>/comments \
   -f body="$(cat <<'EOF'
-🛡️ **Gatekeeper** flagged this via `<check name>`.
-
-**<short finding title>**
-
-<one concise explanation of the problem>
-
-Suggested fix: <one concise explanation of how to solve it>
-
-<details>
-<summary>Proposed fix</summary>
-
-```diff
-<minimal context>
-- <old code>
-+ <new code>
-<minimal context>
-```
-
-</details>
+<body from above>
 EOF
 )" \
   -f commit_id="<headRefOid>" \
   -f path="<file-path>" \
   -F line=<changed-line-number> \
   -f side=RIGHT
-````
+```
 
-For non-code findings, use the non-code comment example above for the `body` instead
-of the diff-block body; do not include a suggested-fix `<details>` section.
+#### 9b. Local mode triage
 
-Keep inline comments concise. Include:
+Triage one finding at a time — each distinct problem gets its own AskUserQuestion item.
 
-- the 🛡️ `Gatekeeper` label
-- the check name(s) that flagged the issue
-- one sentence explaining the problem
-- one concise prose explanation of how to solve it
-- for code-related fixes, a `<details>` section with
-  `<summary>Proposed fix</summary>` and a small `diff` code block whenever the fix is
-  local and mechanical
-- for non-code fixes, concise visible prose without a suggested-fix `<details>`
-  section
+Everything you need is in `reported.json`: explanation, evidence, fix, and diff. No file
+re-reads.
 
-Every posted comment must say what the problem is and how to solve it. For code-related
-fixes, include a `diff` block whenever the replacement code is clear enough to be
-useful as a reference. Do not render planned inline comments for local/mechanical
-code fixes until you have attempted to build those diffs.
+**Print the cards in a normal chat message FIRST, then ask.** AskUserQuestion renders its
+text as plain text, so ```diff fences get no red/green colouring inside the widget. The
+polished version belongs in your message; the widget stays a thin control.
 
-Do not post inline comments if every check passed.
-
-### 10. Triage local findings (local mode only)
-
-Only do this step when the review source is local changes and something failed.
-
-Triage **one deduplicated finding at a time**. Each distinct problem gets its own
-AskUserQuestion item so the user decides on each independently. Never merge two
-genuinely different problems into one question; never split one problem into two
-just because multiple checks flagged it.
-
-**Build the diff suggestion HERE, not in the sub-agents.** The sub-agents return their
-findings as prose (file/line + what's wrong + the replacement described inline) — that
-keeps the parallel check phase fast. Now, only for the findings you are about to triage,
-turn each prose suggestion into a `-`/`+` diff: read just the specific line(s) named in
-the finding from that file (a few lines, not the whole file) and pair the original line
-with the suggested replacement. You do this lazily, per finding, so the cost lands only
-on real findings — never on checks that passed.
-
-**Print the finding "cards" in the normal chat message FIRST, then ask.**
-AskUserQuestion renders its question text as plain text — ```diff fences do NOT get
-red/green coloring inside the question box. So the polished, colored version lives in
-your regular assistant message (CommonMark, which renders identically in every agent
-tool), and the question widget underneath stays a thin control. The flow per batch:
-
-1. **Render each finding as a card** in your normal message. This card is plain
-   CommonMark so it looks the same in Cursor, Claude Code, and any other tool. Use
-   exactly this structure, with a `---` divider after each card:
+1. One card per finding, `---` divider after each:
 
    ````
    ### 🔴 Hardcoded DB password
-   `src/database.ts:12` · flagged by Security Review + Code Quality
+   `src/api/app.module.ts:925` · confirmed · flagged by Security Review + Code Quality
 
    Password is committed in source instead of read from the environment.
 
+   Evidence: app.module.ts:925 passes a literal; no env fallback in this module.
+
    ```diff
    -     password: '1223456789',
-   +     password: process.env.DB_PASSWORD,
+   +     password: process.env.PG_PASSWORD,
    ```
    ---
    ````
 
-   - Heading: `### <severity emoji> <short title>` — 🔴 Error, 🟡 Warning, 🔵 Info
-   - Context line: `` `<file>:<line>` · flagged by <check(s)> `` (backticks make the
-     path clickable in most tools)
-   - One sentence describing the problem
-   - The fix as a ```diff fenced block (`-` removed / `+` added) so it renders red/green
-   - A `---` divider after each finding
+   Severity emoji: 🔴 Error, 🟡 Warning, 🔵 Info. Label unproven findings as unproven on
+   the context line.
 
-2. Then call AskUserQuestion. Keep the question text **organized exactly like this** —
-   numbered finding + file/line on the first line, a blank line, the question, a blank
-   line, then the `-`/`+` suggestion lines:
+2. Then AskUserQuestion, structured so the suggestion is visible:
+
    ```
-   1. Hardcoded DB password at database.ts:12
+   1. Hardcoded DB password at app.module.ts:925
 
-   Switch to process.env.DB_PASSWORD?
+   Switch to process.env.PG_PASSWORD?
 
    -     password: '1223456789',
-   +     password: process.env.DB_PASSWORD,
+   +     password: process.env.PG_PASSWORD,
    ```
-   It renders as plain monochrome text in the widget (the colored version is in the card
-   above), but the structure keeps it scannable. Do NOT use a vague pointer like "apply
-   the fix shown above?".
+
    - Header: `<file> — flagged by <check(s)>`
-   - Provide exactly two options — do NOT add a custom/"reply in chat" option, because
-     AskUserQuestion already includes a built-in "Other: (type to answer)" free-text
-     choice. Adding your own would duplicate it.
-     - **Fix it** — apply the code suggestion
-     - **Skip** — leave it as is
-   If the user answers via the built-in "Other" with a custom instruction (e.g. "use
-   an env var named DB_PASS"), follow that instruction for the finding.
+   - Exactly two options. Do NOT add a custom/"reply in chat" option — AskUserQuestion
+     already provides a built-in "Other: (type to answer)".
+     - **Fix it** — apply the suggestion
+     - **Skip** — leave it, and record the dismissal
+   - Honour a custom instruction given via "Other".
 
-Batch up to 4 findings per AskUserQuestion call; use multiple calls if there are more.
-When batching, print all the findings + diffs for that batch first, then ask all of
-them in one AskUserQuestion call. Then execute each choice — apply the suggestion,
-skip, or follow the custom instruction. Only edit changed files; never touch
-pre-existing issues in unchanged code.
+Batch up to 4 per call. Print all cards for the batch, then ask together. Only edit
+changed files; never touch pre-existing issues in unchanged code.
 
-### 11. Clean up
+For every finding the user skipped, record it so it is never asked again:
 
-After triage (or after the summary if everything passed), remove the temp handoff
-files: `rm -f /tmp/gatekeeper-diff.patch /tmp/gatekeeper-log.txt`.
+```bash
+node .gatekeeper/bin/gk.mjs dismiss --run <runDir> --id F02,F05 --date <YYYY-MM-DD>
+```
+
+`--date` is required: the engine has no trusted clock, so pass today's date from your
+context.
+
+### 10. Clean up
+
+```bash
+node .gatekeeper/bin/gk.mjs cleanup --now <ISO-timestamp>
+```
+
+Removes every Gatekeeper worktree and prunes runs older than 30 days. It never touches
+`dismissals.json` or `cache/`, and it is idempotent.
+
+**Run this on every exit path** — success, nothing found, an analyzer crash, a failed
+check, or the user abandoning triage. A leaked worktree keeps a stale checkout on disk and
+dirties `git worktree list` in the user's repo. If `warnings` is non-empty, relay the exact
+command the user should run.
 
 ## Design Notes
 
-- Keep the runner stable.
-- Keep checks small and focused.
-- Put repo-specific review policy in check files, not in the runner.
-- Avoid over-specifying presentation details unless they are necessary for
-  correct behavior.
-- Prefer small, additive changes to the runner over large workflow rewrites.
+- Everything Gatekeeper owns lives under `.gatekeeper/`: the engine (`bin/`, `lib/`), its
+  tests (`test/`), the policy (`checks/`, `analyzers.mjs`), and these skill definitions
+  (`skills/`). `.agents/skills/*` and `.claude/skills/*` are symlinks into `skills/` so
+  each agent harness discovers the skill without owning a second copy. Copying
+  `.gatekeeper/` into another repo brings the whole reviewer with it.
+- Inside that directory the engine/policy split still holds. `bin/` and `lib/` are generic
+  and know nothing about this repo; `checks/` and `analyzers.mjs` are entirely
+  repo-specific. Deleting a check or `analyzers.mjs` degrades a review without breaking the
+  engine.
+- Determinism before the agents is what makes a wide fan-out affordable. Every stage the
+  engine owns is computed once and shared. Resist moving that work into agents or into
+  your own context.
+- Agent count is the cost, not prompt length. The patch dominates what an agent reads, so
+  grouping checks onto fewer agents is the only large lever — trimming prompt wording is
+  rounding error.
+- Agents write findings to disk and return `DONE`. Bulk review text must never flow
+  through the orchestrator.
+- Never report an unverified finding. Precision is the product; a reviewer that cries wolf
+  gets muted.
+- Prefer extending a `gk` subcommand over adding shell steps back into this file.
