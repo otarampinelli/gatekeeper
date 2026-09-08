@@ -1,0 +1,16 @@
+{
+  "name": "gatekeeper",
+  "version": "0.1.0",
+  "description": "AI code review for local changes and GitHub PRs, in the agent you already use.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/otarampinelli/gatekeeper.git"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}
