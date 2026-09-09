@@ -1,5 +1,3 @@
-//   node --test .gatekeeper/test/
-
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -7,8 +5,6 @@ import { churn } from '../lib/manifest.mjs'
 import { parseFrontmatter, groupChecks } from '../lib/policy.mjs'
 import { batch } from '../lib/prompts.mjs'
 import { parseCandidateFile, parseVerdict, rank, fingerprint } from '../lib/findings.mjs'
-
-// --------------------------------------------------------------------------- churn
 
 test('churn counts content present on both sides as a move', () => {
   const patch = ['--- a/x.ts', '+++ b/x.ts', '-const a = 1', '-const b = 2', '+const a = 1', '+const b = 2'].join('\n')
@@ -34,8 +30,6 @@ test('churn matches a moved line only once per occurrence', () => {
   const patch = ['--- a/x.ts', '+++ b/x.ts', '-dup', '+dup', '+dup'].join('\n')
   assert.deepEqual(churn(patch), { added: 2, removed: 1, identical: 1 })
 })
-
-// --------------------------------------------------------------- candidate parsing
 
 test('parseCandidateFile reads a passing check', () => {
   const r = parseCandidateFile('RESULT: PASS\nNothing to flag here.\n', 'simplicity')
@@ -141,8 +135,6 @@ test('parseCandidateFile infers FAIL when the RESULT line is missing but a findi
   assert.equal(r.findings.length, 1)
 })
 
-// ------------------------------------------------------------------ verdict parsing
-
 test('parseVerdict reads each verdict and its reason', () => {
   for (const v of ['CONFIRMED', 'REJECTED', 'UNPROVEN']) {
     const p = parseVerdict(`VERDICT: ${v}\nREASON: because I checked the base revision\n`)
@@ -161,8 +153,6 @@ test('parseVerdict picks up a corrected location', () => {
   const p = parseVerdict('VERDICT: CONFIRMED\nREASON: real, but one line down\nCORRECTED_LINE: app.ts:44\n')
   assert.equal(p.correctedLine, 'app.ts:44')
 })
-
-// ------------------------------------------------------------------ reporting gate
 
 function finding(over = {}) {
   return {
@@ -289,8 +279,6 @@ test('rank labels everything UNVERIFIED when verification was skipped', () => {
   assert.equal(reported[0].verdict, 'UNVERIFIED')
 })
 
-// --------------------------------------------------------------------- fingerprints
-
 test('fingerprint ignores the line number so an edit above a finding does not reopen it', () => {
   const a = fingerprint({ file: 'a.ts', check: 'code-quality', title: 'Magic number' })
   const b = fingerprint({ file: 'a.ts', check: 'code-quality', title: 'Magic number' })
@@ -308,8 +296,6 @@ test('fingerprint separates findings by file and by check', () => {
   assert.notEqual(base, fingerprint({ file: 'b.ts', check: 'c', title: 't' }))
   assert.notEqual(base, fingerprint({ file: 'a.ts', check: 'd', title: 't' }))
 })
-
-// ------------------------------------------------------------------- frontmatter
 
 test('parseFrontmatter reads scalars and lists', () => {
   const fm = parseFrontmatter(
@@ -348,8 +334,6 @@ test('parseFrontmatter skips comments and keeps a value containing a colon', () 
   const fm = parseFrontmatter(['---', '# a comment', 'description: Flag this: and that', '---'].join('\n'))
   assert.equal(fm.description, 'Flag this: and that')
 })
-
-// ----------------------------------------------------------------------- grouping
 
 function check(stem, group, bytes = 1000) {
   return { stem, group: group ?? stem, bytes, path: `/checks/${stem}.md`, name: stem }
@@ -400,8 +384,6 @@ test('groupChecks reports the combined byte weight of each agent', () => {
   const [group] = groupChecks([check('a', 'g', 100), check('b', 'g', 250)])
   assert.equal(group.bytes, 350)
 })
-
-// ------------------------------------------------------------------------ batching
 
 test('batch splits findings into verifier-sized groups and loses none', () => {
   const ids = Array.from({ length: 12 }, (_, i) => i + 1)
