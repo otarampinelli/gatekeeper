@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gatekeeper — AI code review in the agent you already use</title>
+<meta name="description" content="Define checks as markdown, run them with /gatekeeper. No API keys, no CI wiring — it runs right inside Claude Code, Cursor, or any agent that reads the skills convention.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🛡️</text></svg>">
+<style>
+  :root{
+    --bg:#0a0d10;
+    --bg-raised:#12171c;
+    --bg-terminal:#0d1117;
+    --border:#1f2a30;
+    --text:#e6edf0;
+    --text-dim:#9fb0b8;
+    --text-faint:#5c6b73;
+    --accent:#5eead4;
+    --accent-dim:#2d7a6e;
+    --pass:#4ade80;
+    --fail:#f87171;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{color-scheme:dark}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:var(--sans);
+    line-height:1.5;
+    padding-inline:20px;
+  }
+  a{color:var(--accent)}
+  .wrap{max-width:920px;margin:0 auto}
+
+  header.hero{
+    padding-block:72px 48px;
+    text-align:center;
+  }
+  .badge{
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+    font-family:var(--mono);
+    font-size:12px;
+    color:var(--text-dim);
+    background:var(--bg-raised);
+    border:1px solid var(--border);
+    padding:6px 12px;
+    border-radius:999px;
+    margin-bottom:24px;
+  }
+  h1{
+    font-size:clamp(32px, 6vw, 52px);
+    line-height:1.1;
+    margin:0 0 16px;
+    letter-spacing:-0.02em;
+  }
+  h1 .shield{font-size:0.85em}
+  .tagline{
+    font-size:clamp(16px, 2.4vw, 19px);
+    color:var(--text-dim);
+    max-width:620px;
+    margin:0 auto 36px;
+  }
+
+  .install{
+    display:inline-flex;
+    align-items:center;
+    gap:12px;
+    background:var(--bg-terminal);
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:14px 16px 14px 20px;
+    font-family:var(--mono);
+    font-size:14px;
+    max-width:100%;
+    overflow-x:auto;
+  }
+  .install code{color:var(--accent); white-space:pre}
+  .install code .dim{color:var(--text-faint)}
+  .copy-btn{
+    flex:none;
+    background:var(--bg-raised);
+    border:1px solid var(--border);
+    color:var(--text-dim);
+    border-radius:6px;
+    padding:6px 10px;
+    font-family:var(--mono);
+    font-size:12px;
+    cursor:pointer;
+  }
+  .copy-btn:hover{color:var(--text); border-color:var(--accent-dim)}
+  .copy-btn:active{transform:translateY(1px)}
+
+  .cta-row{
+    display:flex;
+    gap:12px;
+    justify-content:center;
+    flex-wrap:wrap;
+    margin-top:20px;
+  }
+  .btn{
+    font-family:var(--sans);
+    font-size:14px;
+    font-weight:600;
+    padding:10px 18px;
+    border-radius:8px;
+    text-decoration:none;
+    border:1px solid var(--border);
+    color:var(--text);
+  }
+  .btn.primary{background:var(--accent); color:#08211d; border-color:var(--accent)}
+  .btn.primary:hover{filter:brightness(1.08)}
+  .btn.ghost:hover{border-color:var(--accent-dim); color:var(--accent)}
+
+  section{padding-block:40px}
+  .section-title{
+    font-size:13px;
+    font-family:var(--mono);
+    color:var(--text-faint);
+    text-transform:uppercase;
+    letter-spacing:0.08em;
+    margin:0 0 20px;
+  }
+
+  .terminal{
+    background:var(--bg-terminal);
+    border:1px solid var(--border);
+    border-radius:12px;
+    overflow:hidden;
+  }
+  .terminal-bar{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    padding:10px 14px;
+    border-bottom:1px solid var(--border);
+    background:var(--bg-raised);
+  }
+  .dot{width:10px;height:10px;border-radius:50%}
+  .dot.r{background:#ff5f57}
+  .dot.y{background:#febc2e}
+  .dot.g{background:#28c840}
+  .terminal-title{
+    margin-left:8px;
+    font-family:var(--mono);
+    font-size:12px;
+    color:var(--text-faint);
+  }
+  .terminal-body{
+    font-family:var(--mono);
+    font-size:13px;
+    padding:20px;
+    overflow-x:auto;
+    white-space:pre;
+  }
+  .terminal-body .prompt{color:var(--accent)}
+  .terminal-body .dim{color:var(--text-faint)}
+  .terminal-body .pass{color:var(--pass)}
+  .terminal-body .fail{color:var(--fail)}
+  .terminal-body .fix-row{
+    display:inline-block;
+    margin-top:6px;
+    color:var(--text-dim);
+  }
+  .terminal-body .key{
+    background:var(--bg-raised);
+    border:1px solid var(--border);
+    border-radius:4px;
+    padding:1px 6px;
+    color:var(--text);
+  }
+
+  .grid{
+    display:grid;
+    grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));
+    gap:16px;
+  }
+  .card{
+    background:var(--bg-raised);
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:20px;
+  }
+  .card h3{
+    margin:0 0 8px;
+    font-size:15px;
+  }
+  .card p{
+    margin:0;
+    font-size:13.5px;
+    color:var(--text-dim);
+  }
+
+  .steps{
+    display:grid;
+    grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));
+    gap:16px;
+  }
+  .step{
+    border-left:2px solid var(--accent-dim);
+    padding-left:14px;
+  }
+  .step .n{
+    font-family:var(--mono);
+    color:var(--accent);
+    font-size:12px;
+  }
+  .step h4{margin:4px 0 6px; font-size:14px}
+  .step p{margin:0; font-size:13px; color:var(--text-dim)}
+
+  .checks-pills{
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+  }
+  .pill{
+    font-family:var(--mono);
+    font-size:12.5px;
+    color:var(--text-dim);
+    background:var(--bg-raised);
+    border:1px solid var(--border);
+    padding:6px 12px;
+    border-radius:999px;
+  }
+
+  .check-example{
+    background:var(--bg-terminal);
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:18px 20px;
+    font-family:var(--mono);
+    font-size:12.5px;
+    overflow-x:auto;
+    color:var(--text-dim);
+    white-space:pre;
+  }
+  .check-example .key{color:var(--accent)}
+  .check-example .str{color:var(--text)}
+
+  footer{
+    border-top:1px solid var(--border);
+    padding-block:36px 56px;
+    text-align:center;
+    color:var(--text-faint);
+    font-size:13px;
+  }
+  footer a{color:var(--text-dim)}
+  footer .tagline-small{
+    font-family:var(--mono);
+    margin-top:10px;
+  }
+
+  @media (max-width:520px){
+    .install{padding:12px 12px 12px 14px; font-size:12.5px}
+    .terminal-body{font-size:12px; padding:16px}
+    header.hero{padding-block:48px 32px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <span class="badge">🛡️ open source · MIT</span>
+    <h1><span class="shield">🛡️</span> Gatekeeper</h1>
+    <p class="tagline">AI code review for local changes and GitHub PRs, in the agent you already use. Define checks as markdown, run them with <code>/gatekeeper</code> — no API keys, no CI wiring.</p>
+
+    <div class="install">
+      <code id="install-cmd">npx skills add otarampinelli/gatekeeper <span class="dim">--full-depth --all</span></code>
+      <button class="copy-btn" id="copy-btn" type="button">Copy</button>
+    </div>
+
+    <div class="cta-row">
+      <a class="btn primary" href="https://github.com/otarampinelli/gatekeeper">View on GitHub</a>
+      <a class="btn ghost" href="https://github.com/otarampinelli/gatekeeper#install">Read the docs</a>
+    </div>
+  </header>
+
+  <section>
+    <p class="section-title">See it run</p>
+    <div class="terminal">
+      <div class="terminal-bar">
+        <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="terminal-title">your-project — gatekeeper</span>
+      </div>
+      <div class="terminal-body"><span class="prompt">&gt; /gatekeeper</span>
+<span class="dim">snapshotting changes... 4 files (3 modified, 1 new)
+gating .gatekeeper/checks/*.md against the diff... 3 apply
+running Security Review, Test Coverage, Simplicity in parallel
+verifying candidate findings before reporting...</span>
+
+<span class="fail">✗ Security Review</span>  lib/auth.js:42
+  Hardcoded API key committed to source.
+  <span class="fix-row">[<span class="key">Fix it</span>]  [<span class="key">Skip</span>]</span>
+
+<span class="pass">✓ Test Coverage</span>   passed
+<span class="pass">✓ Simplicity</span>      passed</div>
+    </div>
+  </section>
+
+  <section>
+    <p class="section-title">Why it's different</p>
+    <div class="grid">
+      <div class="card">
+        <h3>No API keys, no CI wiring</h3>
+        <p>It runs inside the agent you already have open — Claude Code, Cursor, or any tool that reads the skills convention. Nothing extra to configure.</p>
+      </div>
+      <div class="card">
+        <h3>Checks are just markdown</h3>
+        <p>A check is frontmatter plus a plain-English prompt describing what to look for. No plugin API, no DSL to learn.</p>
+      </div>
+      <div class="card">
+        <h3>Isolated, parallel review</h3>
+        <p>Checks are gated by which files actually changed, grouped, then run in parallel sub-agents so one check's reasoning can't bleed into another's verdict.</p>
+      </div>
+      <div class="card">
+        <h3>Verified before you see it</h3>
+        <p>Every candidate finding goes through an adversarial verification pass. Nothing gets reported just because an agent said so.</p>
+      </div>
+      <div class="card">
+        <h3>Local or PR mode</h3>
+        <p>Review your working tree before you push, or point it at a GitHub PR — it fetches the diff via <code>gh</code> and can post findings back as inline comments.</p>
+      </div>
+      <div class="card">
+        <h3>Fix it right there</h3>
+        <p>Every finding comes with a colored diff and a Fix it / Skip choice, so you resolve issues in the same pass you found them.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="section-title">How it works</p>
+    <div class="steps">
+      <div class="step">
+        <div class="n">01</div>
+        <h4>Gate</h4>
+        <p>Skip checks whose <code>applies_to</code> globs don't match any changed file.</p>
+      </div>
+      <div class="step">
+        <div class="n">02</div>
+        <h4>Group</h4>
+        <p>Checks sharing a <code>group</code> run together in one agent; everything else gets its own.</p>
+      </div>
+      <div class="step">
+        <div class="n">03</div>
+        <h4>Judge</h4>
+        <p>Your coding agent reviews the diff against each check's prompt, in parallel.</p>
+      </div>
+      <div class="step">
+        <div class="n">04</div>
+        <h4>Verify</h4>
+        <p>Candidate findings are double-checked adversarially before anything is shown to you.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="section-title">Ships with 10 default checks</p>
+    <div class="checks-pills">
+      <span class="pill">Security Review</span>
+      <span class="pill">Code Quality</span>
+      <span class="pill">Test Coverage</span>
+      <span class="pill">Anti-Slop</span>
+      <span class="pill">Completeness</span>
+      <span class="pill">Dead-End Code</span>
+      <span class="pill">Documentation Impact</span>
+      <span class="pill">Prose Style</span>
+      <span class="pill">Scope Fidelity</span>
+      <span class="pill">Simplicity</span>
+    </div>
+  </section>
+
+  <section>
+    <p class="section-title">A check is just this</p>
+    <div class="check-example"><span class="key">---
+name:</span> <span class="str">Security Review</span>
+<span class="key">description:</span> <span class="str">Flag security issues in the diff</span>
+<span class="key">hints:</span>
+  - <span class="str">Use when a change touches auth, permissions, or external input handling.</span>
+<span class="key">---</span>
+
+Review the diff. Fail the check if any of these are true:
+
+- Hardcoded API keys, tokens, or passwords
+- New endpoints without input validation
+- SQL queries built with string concatenation
+
+If none are found, pass the check.</div>
+  </section>
+
+  <footer>
+    <div class="install" style="margin:0 auto 16px; display:inline-flex">
+      <code>npx skills add otarampinelli/gatekeeper <span class="dim">--full-depth --all</span></code>
+    </div>
+    <div>
+      <a href="https://github.com/otarampinelli/gatekeeper">github.com/otarampinelli/gatekeeper</a>
+      · MIT licensed
+    </div>
+    <div class="tagline-small">Built to be run, not configured. 🛡️</div>
+  </footer>
+
+</div>
+<script>
+  document.getElementById('copy-btn').addEventListener('click', function () {
+    var text = 'npx skills add otarampinelli/gatekeeper --full-depth --all';
+    navigator.clipboard.writeText(text).then(function () {
+      var btn = document.getElementById('copy-btn');
+      var original = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(function () { btn.textContent = original; }, 1500);
+    });
+  });
+</script>
+</body>
+</html>
