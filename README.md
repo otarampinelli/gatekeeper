@@ -33,19 +33,24 @@ tool that reads the skills convention), so there's nothing extra to configure.
 ## Install
 
 This repo ships two skills: `gatekeeper` (the runner) and `gatekeeper-writing-checks`
-(the authoring guide for `.gatekeeper/checks/*.md`). They live in separate `SKILL.md`
-files, so installing needs `--full-depth` to pick up both:
+(the authoring guide for `.gatekeeper/checks/*.md`). Both live under `skills/` in this
+repo, so one command picks up both:
 
 ```bash
-npx skills add otarampinelli/gatekeeper --full-depth --all
+npx skills add otarampinelli/gatekeeper --all
 ```
 
-That drops both skills into your tool's skills folder (`.agents/skills/gatekeeper`,
-`.claude/skills/gatekeeper`, …). The first time you run `/gatekeeper`, it offers to scaffold
-`.gatekeeper/checks/` in your project. Done.
+That drops only the skill markdown into your tool's skills folder (`.agents/skills/gatekeeper`,
+`.claude/skills/gatekeeper`, …) — no engine code, no tests, no `package.json`. The first
+time you run `/gatekeeper`, it vendors the engine and default check templates into your
+project's `.gatekeeper/` folder automatically (see `SKILL.md` step 0). Done.
 
-Only want the runner? `npx skills add otarampinelli/gatekeeper` installs just `gatekeeper`
-(the default shallow search stops at the root `SKILL.md`).
+Only want the runner? `npx skills add otarampinelli/gatekeeper -s gatekeeper` installs just
+`gatekeeper`, skipping the authoring skill.
+
+Already installed before this change? Your `.claude/skills/gatekeeper/` may still hold the
+full old engine tree. Re-run the install command (or `npx skills update`) — it replaces the
+skill folder outright, so the stale copy is gone on the next update.
 
 ## Use it
 
@@ -122,7 +127,7 @@ If none are found, pass the check.
 > Stick to one concern per check. One that tries to cover security, test coverage, and
 > docs all at once just produces muddled results; split it into three instead.
 
-See the `writing-checks` skill in this repo for the full authoring guide.
+See the [`writing-checks`](./skills/writing-checks/SKILL.md) skill in this repo for the full authoring guide.
 
 ## Writing analyzers
 
@@ -182,31 +187,40 @@ so the whole team runs the same checks.
 
 ## Repository layout
 
-This repo ships two skills plus the engine they both depend on:
+Only `skills/` is skill-facing markdown — the part that gets installed into an AI tool's
+skills folder. Everything else is engine code that gets vendored into a project's own
+`.gatekeeper/` folder on first run instead (see `SKILL.md` step 0):
 
 ```text
-.github/workflows/     # CI: runs `npm test` on push to main and on PRs
-SKILL.md              # the installed /gatekeeper runner
-reports/pr-report.md    # step 9, PR mode: read only when the run is a PR review
-reports/local-report.md # step 9, local mode: read only when the run is a local review
-checks/*.md           # bundled check templates copied on first run
-writing-checks/       # the gatekeeper-writing-checks skill (authoring guide)
-bin/gk.mjs            # the deterministic engine CLI
-lib/*.mjs             # engine internals: diff capture, manifest, gating, findings
-test/engine.test.mjs  # unit tests for the engine's pure functions
+.github/workflows/          # CI: runs `npm test` on push to main and on PRs
+skills/
+  gatekeeper/
+    SKILL.md                # the installed /gatekeeper runner
+    reports/pr-report.md    # step 9, PR mode: read only when the run is a PR review
+    reports/local-report.md # step 9, local mode: read only when the run is a local review
+  writing-checks/
+    SKILL.md                # the gatekeeper-writing-checks skill (authoring guide)
+checks/*.md                 # bundled check templates, vendored into .gatekeeper/checks/
+bin/gk.mjs                  # the deterministic engine CLI, vendored into .gatekeeper/bin/
+lib/*.mjs                   # engine internals: diff capture, manifest, gating, findings
+test/engine.test.mjs        # unit tests for the engine's pure functions
+package.json
 README.md
 ```
 
-The installed skill folder is not the same as a project's `.gatekeeper/` folder:
+A project's `.gatekeeper/` folder is not the same as this repo's layout:
 
-- `checks/*.md` are default templates that ship with the skill.
-- `.gatekeeper/checks/*.md` are the actual checks `/gatekeeper` runs in a project,
+- `checks/*.md` here are default templates that ship with the engine.
+- `.gatekeeper/checks/*.md` in a project are the actual checks `/gatekeeper` runs there,
   alongside `.gatekeeper/analyzers.mjs`, that project's own deterministic-input policy.
+- `.gatekeeper/bin/`, `.gatekeeper/lib/`, and `.gatekeeper/test/` in a project are a vendored
+  copy of this repo's `bin/`, `lib/`, and `test/` — never touched by `npx skills add`, only
+  by the bootstrap step in `SKILL.md`.
 
 ## How it works
 
 Gatekeeper splits the work between a deterministic engine and your agent's judgment, see
-the ownership table in [`SKILL.md`](./SKILL.md) for the full split.
+the ownership table in [`SKILL.md`](./skills/gatekeeper/SKILL.md) for the full split.
 
 There are two modes: local mode reviews your working tree, and PR mode fetches the diff
 from GitHub through the `gh` CLI (in its own detached worktree) and posts findings back

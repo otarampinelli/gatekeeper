@@ -60,6 +60,33 @@ node --test '.gatekeeper/test/*.test.mjs'
 
 ---
 
+### 0. Bootstrap the engine (first run only)
+
+`.gatekeeper/bin/gk.mjs` does not ship inside this skill folder — only this `SKILL.md` and
+`reports/` do. The engine, its tests, and the default check templates live in the
+`gatekeeper` GitHub repo and are vendored into the project on first use:
+
+```bash
+if [ ! -f .gatekeeper/bin/gk.mjs ]; then
+  tmp=$(mktemp -d)
+  git clone --depth 1 https://github.com/otarampinelli/gatekeeper.git "$tmp"
+  mkdir -p .gatekeeper
+  cp -r "$tmp"/bin "$tmp"/lib "$tmp"/test .gatekeeper/
+  if [ ! -d .gatekeeper/checks ]; then
+    cp -r "$tmp"/checks .gatekeeper/checks
+    echo "scaffolded .gatekeeper/checks/ with starter templates"
+  fi
+  rm -rf "$tmp"
+fi
+```
+
+Run this once, silently — skip it entirely once `.gatekeeper/bin/gk.mjs` exists. It never
+overwrites an existing `.gatekeeper/checks/`, so a project's customized checks are never
+clobbered by a later bootstrap. Tell the user `.gatekeeper/` was created; only mention that
+`.gatekeeper/checks/*.md` are starting templates to edit and commit if the script printed
+the "scaffolded" line — a project that already had its own `.gatekeeper/checks/` keeps it
+untouched.
+
 ### 1. Choose review source
 
 - no argument -> local changes
@@ -261,10 +288,11 @@ command the user should run.
 
 ## Design Notes
 
-- Everything Gatekeeper owns lives under `.gatekeeper/`: the engine (`bin/`, `lib/`), its
-  tests (`test/`), the policy (`checks/`, `analyzers.mjs`), and this skill plus
-  `writing-checks/` (the authoring skill). Copying `.gatekeeper/` into another repo brings
-  the whole reviewer with it.
+- Everything Gatekeeper owns in a project lives under `.gatekeeper/`: the engine (`bin/`,
+  `lib/`), its tests (`test/`), and the policy (`checks/`, `analyzers.mjs`). Copying
+  `.gatekeeper/` into another repo brings the whole reviewer with it. Only this `SKILL.md`,
+  its `reports/`, and the `writing-checks` authoring skill live in the AI tool's skills
+  folder instead — see Step 0 for how `.gatekeeper/` gets populated.
 - Inside that directory the engine/policy split still holds. `bin/` and `lib/` are generic
   and know nothing about this repo; `checks/` and `analyzers.mjs` are entirely
   repo-specific. Deleting a check or `analyzers.mjs` degrades a review without breaking the
