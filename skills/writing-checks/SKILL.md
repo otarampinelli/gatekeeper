@@ -113,7 +113,7 @@ Rules:
 After changing groups, confirm the shape is what you intended:
 
 ```bash
-node .gatekeeper/bin/gk.mjs prepare
+node "$HOME/.gatekeeper/bin/gk.mjs" prepare
 ```
 
 The output reports `agents` and the `groups` that produced them.

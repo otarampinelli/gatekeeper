@@ -32,25 +32,46 @@ tool that reads the skills convention), so there's nothing extra to configure.
 
 ## Install
 
-This repo ships two skills: `gatekeeper` (the runner) and `gatekeeper-writing-checks`
-(the authoring guide for `.gatekeeper/checks/*.md`). Both live under `skills/` in this
-repo, so one command picks up both:
+Gatekeeper has two independent parts: an engine that runs once, globally, on your machine
+(no matter how many projects you review), and a skill you install per AI tool that teaches
+it to drive that engine. Neither one is language-specific: checks are plain-language
+prompts your agent judges against the diff, not language-specific code, so the same engine
+and the same bundled checks work unchanged in a JavaScript, Python, Rust, or Go repo.
+
+**1. Install the engine globally, once:**
+
+```bash
+git clone --depth 1 https://github.com/otarampinelli/gatekeeper.git ~/.gatekeeper
+mkdir -p ~/.local/bin
+ln -sf ~/.gatekeeper/bin/gk.mjs ~/.local/bin/gk
+```
+
+Make sure `~/.local/bin` is on your `PATH`. This never touches the project you're
+reviewing: no `package.json`, no `node_modules/`, no Gatekeeper runtime files land in a
+Rust repo, a Python repo, or anywhere else. (If your shell aliases `gk` to something else —
+oh-my-zsh's git plugin binds it to `gitk` — either drop that alias or invoke
+`~/.gatekeeper/bin/gk.mjs` directly; skills do this automatically.)
+
+**2. Install the skill into your AI tool:**
 
 ```bash
 npx skills add otarampinelli/gatekeeper --all
 ```
 
-That drops only the skill markdown into your tool's skills folder (`.agents/skills/gatekeeper`,
-`.claude/skills/gatekeeper`, …) — no engine code, no tests, no `package.json`. The first
-time you run `/gatekeeper`, it vendors the engine and default check templates into your
-project's `.gatekeeper/` folder automatically (see `SKILL.md` step 0). Done.
+This drops only skill markdown into your tool's skills folder (`.agents/skills/gatekeeper`,
+`.claude/skills/gatekeeper`, …) — no engine code. The first time you run `/gatekeeper` in a
+project, it runs `gk init`, which scaffolds `.gatekeeper/checks/` from the bundled
+templates if it doesn't already exist (see `SKILL.md` step 0). `.gatekeeper/analyzers.mjs`
+is optional and project-specific; write one yourself, or ask your agent to, once you know
+which tools this project actually uses.
 
 Only want the runner? `npx skills add otarampinelli/gatekeeper -s gatekeeper` installs just
-`gatekeeper`, skipping the authoring skill.
+`gatekeeper`, skipping the `writing-checks` authoring skill.
 
-Already installed before this change? Your `.claude/skills/gatekeeper/` may still hold the
-full old engine tree. Re-run the install command (or `npx skills update`) — it replaces the
-skill folder outright, so the stale copy is gone on the next update.
+Already installed before this change? Older versions vendored a full copy of the engine
+into each project's `.gatekeeper/bin`, `.gatekeeper/lib`, and `.gatekeeper/test`. Those are
+no longer read or written by the skill — delete them freely; only `.gatekeeper/checks/` and
+`.gatekeeper/analyzers.mjs` are still project state.
 
 ## Use it
 
@@ -174,7 +195,7 @@ Ten default check templates ship in [`checks/`](./checks):
 | **Scope Fidelity** | Changes that drift beyond what the PR/task actually asked for |
 | **Simplicity** | Unneeded abstraction, indirection, or complexity |
 
-On first run, Gatekeeper can copy those templates into your project:
+On first run, `gk init` scaffolds those templates into your project:
 
 ```text
 your-project/
@@ -182,14 +203,17 @@ your-project/
     checks/*.md
 ```
 
-Copy, edit, and add your own checks there. Commit `.gatekeeper/checks/` with your repo
-so the whole team runs the same checks.
+Copy, edit, and add your own checks there. `analyzers.mjs` has no default and no
+per-language template: your agent already knows this project's actual toolchain (its lock
+file, its test command, its lint config), so it can write one when asked, better than a
+generic guess could. Commit `.gatekeeper/` with your repo so the whole team runs the same
+checks and analyzers.
 
 ## Repository layout
 
 Only `skills/` is skill-facing markdown — the part that gets installed into an AI tool's
-skills folder. Everything else is engine code that gets vendored into a project's own
-`.gatekeeper/` folder on first run instead (see `SKILL.md` step 0):
+skills folder. Everything else is the engine, installed once, globally, at `~/.gatekeeper`
+(see `SKILL.md` step 0) — it is never copied into a reviewed project:
 
 ```text
 .github/workflows/          # CI: runs `npm test` on push to main and on PRs
@@ -200,22 +224,22 @@ skills/
     reports/local-report.md # step 9, local mode: read only when the run is a local review
   writing-checks/
     SKILL.md                # the gatekeeper-writing-checks skill (authoring guide)
-checks/*.md                 # bundled check templates, vendored into .gatekeeper/checks/
-bin/gk.mjs                  # the deterministic engine CLI, vendored into .gatekeeper/bin/
+checks/*.md                 # bundled, language-agnostic check templates gk init scaffolds
+bin/gk.mjs                  # the deterministic engine CLI, resolved from its own location
 lib/*.mjs                   # engine internals: diff capture, manifest, gating, findings
-test/engine.test.mjs        # unit tests for the engine's pure functions
+test/*.test.mjs             # unit tests for the engine's pure functions
 package.json
 README.md
 ```
 
 A project's `.gatekeeper/` folder is not the same as this repo's layout:
 
-- `checks/*.md` here are default templates that ship with the engine.
-- `.gatekeeper/checks/*.md` in a project are the actual checks `/gatekeeper` runs there,
-  alongside `.gatekeeper/analyzers.mjs`, that project's own deterministic-input policy.
-- `.gatekeeper/bin/`, `.gatekeeper/lib/`, and `.gatekeeper/test/` in a project are a vendored
-  copy of this repo's `bin/`, `lib/`, and `test/` — never touched by `npx skills add`, only
-  by the bootstrap step in `SKILL.md`.
+- `checks/*.md` here are the default templates the engine ships with.
+- `.gatekeeper/checks/*.md` and `.gatekeeper/analyzers.mjs` in a project are that project's
+  own policy — the only two files under `.gatekeeper/` the engine reads. `gk init` scaffolds
+  `checks/*.md` if missing; `analyzers.mjs` has no scaffold and is entirely optional.
+  Nothing under `~/.gatekeeper` is project-specific, and nothing engine-related is written
+  into a reviewed project.
 
 ## How it works
 

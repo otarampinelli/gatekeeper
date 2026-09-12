@@ -53,7 +53,7 @@ changed files; never touch pre-existing issues in unchanged code.
 For every finding the user skipped, record it so it is never asked again:
 
 ```bash
-node .gatekeeper/bin/gk.mjs dismiss --run <runDir> --id F02,F05 --date <YYYY-MM-DD>
+node "$HOME/.gatekeeper/bin/gk.mjs" dismiss --run <runDir> --id F02,F05 --date <YYYY-MM-DD>
 ```
 
 `--date` is required: the engine has no trusted clock, so pass today's date from your

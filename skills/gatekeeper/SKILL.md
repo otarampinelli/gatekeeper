@@ -31,24 +31,32 @@ context.
 
 ## The engine
 
-`.gatekeeper/bin/gk.mjs` — zero dependencies, plain node. Every command prints compact JSON
-to stdout and writes bulk artifacts to disk. Read the artifacts only when you need a
-specific detail; hand their paths to sub-agents instead.
+`~/.gatekeeper/bin/gk.mjs` — zero dependencies, plain node, installed once globally (see
+step 0), never copied into the reviewed project. Every command prints compact JSON to
+stdout and writes bulk artifacts to disk. Read the artifacts only when you need a specific
+detail; hand their paths to sub-agents instead.
+
+Invoke it through the resolved path, not the bare `gk` command: some shells alias `gk` to
+something else (oh-my-zsh's git plugin binds it to `gitk`), and `command -v gk` reports the
+alias as if it were the binary, so detection cannot rely on it either. Each command below
+uses the full path directly for this reason:
 
 ```bash
-node .gatekeeper/bin/gk.mjs help
+node "$HOME/.gatekeeper/bin/gk.mjs" help
 ```
 
-Commands: `prepare`, `context`, `parse`, `rank`, `dismiss`, `cleanup`.
+Commands: `init`, `review`, `prepare`, `context`, `parse`, `rank`, `dismiss`, `cleanup`.
+`review` runs `prepare` + `context` in one call for a quick look; the step-by-step commands
+below still apply since sub-agents must run between `context` and `parse`.
 
 Run state lives in `<git-common-dir>/gatekeeper/` — inside `.git`, so it is never
 committed. `dismissals.json` and `cache/` persist across runs; `runs/<id>/` holds one
 review pass.
 
-The engine's pure functions are tested. If you change one, run them:
+The engine's pure functions are tested. If you change one, run them from `~/.gatekeeper`:
 
 ```bash
-node --test '.gatekeeper/test/*.test.mjs'
+node --test '**/*.test.mjs'
 ```
 
 ## Flags
@@ -62,30 +70,31 @@ node --test '.gatekeeper/test/*.test.mjs'
 
 ### 0. Bootstrap the engine (first run only)
 
-`.gatekeeper/bin/gk.mjs` does not ship inside this skill folder — only this `SKILL.md` and
-`reports/` do. The engine, its tests, and the default check templates live in the
-`gatekeeper` GitHub repo and are vendored into the project on first use:
+`gk`'s engine does not ship inside this skill folder — only this `SKILL.md` and `reports/`
+do. It lives once, globally, at `~/.gatekeeper` (never copied into the reviewed project —
+a Rust or Python repo run through Gatekeeper never gains a `package.json` or
+`node_modules/`):
 
 ```bash
-if [ ! -f .gatekeeper/bin/gk.mjs ]; then
-  tmp=$(mktemp -d)
-  git clone --depth 1 https://github.com/otarampinelli/gatekeeper.git "$tmp"
-  mkdir -p .gatekeeper
-  cp -r "$tmp"/bin "$tmp"/lib "$tmp"/test .gatekeeper/
-  if [ ! -d .gatekeeper/checks ]; then
-    cp -r "$tmp"/checks .gatekeeper/checks
-    echo "scaffolded .gatekeeper/checks/ with starter templates"
-  fi
-  rm -rf "$tmp"
+if [ ! -f "$HOME/.gatekeeper/bin/gk.mjs" ]; then
+  git clone --depth 1 https://github.com/otarampinelli/gatekeeper.git "$HOME/.gatekeeper"
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$HOME/.gatekeeper/bin/gk.mjs" "$HOME/.local/bin/gk"
 fi
+node "$HOME/.gatekeeper/bin/gk.mjs" init
 ```
 
-Run this once, silently — skip it entirely once `.gatekeeper/bin/gk.mjs` exists. It never
-overwrites an existing `.gatekeeper/checks/`, so a project's customized checks are never
-clobbered by a later bootstrap. Tell the user `.gatekeeper/` was created; only mention that
-`.gatekeeper/checks/*.md` are starting templates to edit and commit if the script printed
-the "scaffolded" line — a project that already had its own `.gatekeeper/checks/` keeps it
-untouched.
+Run this once per session, silently. `gk init` scaffolds `.gatekeeper/checks/` from the
+bundled templates if it does not already exist — it never overwrites it, so a project's
+customized checks are never clobbered by a later bootstrap. Tell the user `.gatekeeper/`
+was created only when `gk init`'s `created` array is non-empty; a project that already had
+its own config keeps it untouched.
+
+`gk init` does not scaffold `.gatekeeper/analyzers.mjs` — there is no generic default that
+beats what you can write once you've looked at this project's actual toolchain. If the user
+wants deterministic evidence (lint, typecheck, tests) and none is configured yet, offer to
+write `.gatekeeper/analyzers.mjs` yourself, using the format in this repo's `README.md`
+("Writing analyzers"), rather than guessing a language-generic template.
 
 ### 1. Choose review source
 
@@ -102,8 +111,8 @@ Examples:
 ### 2. Prepare
 
 ```bash
-node .gatekeeper/bin/gk.mjs prepare              # local
-node .gatekeeper/bin/gk.mjs prepare --pr <url>   # PR
+node "$HOME/.gatekeeper/bin/gk.mjs" prepare              # local
+node "$HOME/.gatekeeper/bin/gk.mjs" prepare --pr <url>   # PR
 ```
 
 This one command pins the base to the merge-base, captures the excluded diff, builds the
@@ -162,7 +171,7 @@ ambiguous, ask.
 ### 4. Gather context
 
 ```bash
-node .gatekeeper/bin/gk.mjs context --run <runDir> [--checks a,b] [--deep]
+node "$HOME/.gatekeeper/bin/gk.mjs" context --run <runDir> [--checks a,b] [--deep]
 ```
 
 Pass `--checks` with the stems you settled on in step 3; omit it to cover everything
@@ -216,7 +225,7 @@ through your context.
 ### 6. Parse
 
 ```bash
-node .gatekeeper/bin/gk.mjs parse --run <runDir>
+node "$HOME/.gatekeeper/bin/gk.mjs" parse --run <runDir>
 ```
 
 Aggregates every candidate file, merges exact duplicates across checks, unions their
@@ -251,7 +260,7 @@ An unparseable verdict is treated as UNPROVEN, never CONFIRMED — the engine fa
 ### 8. Rank and summarize
 
 ```bash
-node .gatekeeper/bin/gk.mjs rank --run <runDir> [--no-verify] [--fresh]
+node "$HOME/.gatekeeper/bin/gk.mjs" rank --run <runDir> [--no-verify] [--fresh]
 ```
 
 Applies the reporting gate deterministically: `CONFIRMED` reports; `UNPROVEN` Error reports
@@ -275,7 +284,7 @@ whatever you recall from step 1.
 ### 10. Clean up
 
 ```bash
-node .gatekeeper/bin/gk.mjs cleanup --now <ISO-timestamp>
+node "$HOME/.gatekeeper/bin/gk.mjs" cleanup --now <ISO-timestamp>
 ```
 
 Removes every Gatekeeper worktree and prunes runs older than 30 days. It never touches
@@ -288,15 +297,15 @@ command the user should run.
 
 ## Design Notes
 
-- Everything Gatekeeper owns in a project lives under `.gatekeeper/`: the engine (`bin/`,
-  `lib/`), its tests (`test/`), and the policy (`checks/`, `analyzers.mjs`). Copying
-  `.gatekeeper/` into another repo brings the whole reviewer with it. Only this `SKILL.md`,
-  its `reports/`, and the `writing-checks` authoring skill live in the AI tool's skills
-  folder instead — see Step 0 for how `.gatekeeper/` gets populated.
-- Inside that directory the engine/policy split still holds. `bin/` and `lib/` are generic
-  and know nothing about this repo; `checks/` and `analyzers.mjs` are entirely
-  repo-specific. Deleting a check or `analyzers.mjs` degrades a review without breaking the
-  engine.
+- The engine (`bin/`, `lib/`) lives once, globally, at `~/.gatekeeper` — it knows nothing
+  about any one project. A project's own `.gatekeeper/` holds only its policy: `checks/*.md`
+  and `analyzers.mjs`, both entirely repo-specific and safe to commit. Deleting a check or
+  `analyzers.mjs` degrades a review without breaking the engine. Only this `SKILL.md`, its
+  `reports/`, and the `writing-checks` authoring skill live in the AI tool's skills folder;
+  see Step 0 for how `~/.gatekeeper` and a project's `.gatekeeper/` each get populated.
+- There is no per-language code anywhere in the engine. Checks are language-agnostic prose
+  judged by you, gated purely by `applies_to` globs, so a new language needs no engine
+  change — at most a new check whose globs target it.
 - Determinism before the agents is what makes a wide fan-out affordable. Every stage the
   engine owns is computed once and shared. Resist moving that work into agents or into
   your own context.

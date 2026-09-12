@@ -4,6 +4,7 @@
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   commonGitDir,
@@ -30,6 +31,8 @@ import {
   rank,
   renderSummary,
 } from '../lib/findings.mjs'
+
+const ENGINE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 // Above this, the full check set is too expensive to select by default.
 const WIDE_PATCH_TOKENS = 20000
@@ -138,14 +141,14 @@ async function cmdPrepare(flags) {
 
     if (!manifest.files.length) {
       if (worktree) removeWorktree(worktree, root)
-      return out({
+      return {
         ok: true,
         empty: true,
         mode,
         base,
         baseHow,
         message: 'no changes to review',
-      })
+      }
     }
 
     const runId = mode === 'pr' ? `pr-${prNumber}-${String(head).slice(0, 8)}` : `local-${base.slice(0, 8)}`
@@ -208,7 +211,7 @@ async function cmdPrepare(flags) {
     }
     writeRunMeta(runDir, meta)
 
-    out({
+    return {
       ok: true,
       empty: false,
       runDir,
@@ -239,7 +242,7 @@ async function cmdPrepare(flags) {
         verdictsDir: join(runDir, 'verdicts'),
         promptsDir: join(runDir, 'prompts'),
       },
-    })
+    }
   } catch (err) {
     if (worktree) removeWorktree(worktree, root)
     throw err
@@ -332,7 +335,7 @@ async function cmdContext(flags) {
     ci: ciSummary ?? null,
   })
 
-  out({
+  return {
     ok: true,
     policyPresent: policy.present,
     artifacts: {
@@ -359,7 +362,7 @@ async function cmdContext(flags) {
     },
     checks: selected.length,
     agents,
-  })
+  }
 }
 
 function cmdParse(flags) {
@@ -368,13 +371,13 @@ function cmdParse(flags) {
   const reports = loadCandidates(join(runDir, 'candidates'))
 
   if (!reports.length) {
-    return out({
+    return {
       ok: true,
       reports: 0,
       findings: [],
       verifyAgents: [],
       message: 'no candidate files found in candidates/',
-    })
+    }
   }
 
   const { findings, possibleDuplicates } = dedupe(reports)
@@ -404,7 +407,7 @@ function cmdParse(flags) {
     return { prompt: path, ids: group.map((f) => f.id) }
   })
 
-  out({
+  return {
     ok: true,
     reports: reports.length,
     passed: reports.filter((r) => r.status === 'PASS').map((r) => r.check),
@@ -423,7 +426,7 @@ function cmdParse(flags) {
     possibleDuplicates,
     verifyAgents,
     artifact: join(runDir, 'candidates.json'),
-  })
+  }
 }
 
 function cmdRank(flags) {
@@ -459,7 +462,7 @@ function cmdRank(flags) {
   writeFileSync(join(runDir, 'summary.md'), summary)
   writeFileSync(join(runDir, 'reported.json'), JSON.stringify(reported, null, 2))
 
-  out({
+  return {
     ok: true,
     mode: meta.mode,
     reportGuide: meta.mode === 'pr' ? 'reports/pr-report.md' : 'reports/local-report.md',
@@ -481,7 +484,7 @@ function cmdRank(flags) {
       summary: join(runDir, 'summary.md'),
       reported: join(runDir, 'reported.json'),
     },
-  })
+  }
 }
 
 function cmdDismiss(flags) {
@@ -506,11 +509,11 @@ function cmdDismiss(flags) {
     recordDismissal(meta.stateDir, f, String(flags.date))
     done.push({ id, fingerprint: f.fingerprint, title: f.title })
   }
-  out({
+  return {
     ok: true,
     dismissed: done,
     stateFile: join(meta.stateDir, 'dismissals.json'),
-  })
+  }
 }
 
 function cmdCleanup(flags) {
@@ -557,11 +560,57 @@ function cmdCleanup(flags) {
     }
   }
 
-  out({
+  return {
     ok: true,
     ...results,
     note: 'dismissals.json and cache/ are persistent state and were not touched',
-  })
+  }
+}
+
+function cmdInit() {
+  const root = repoRoot()
+  const created = []
+
+  const checksDir = join(root, '.gatekeeper', 'checks')
+  if (!existsSync(checksDir)) {
+    mkdirSync(checksDir, { recursive: true })
+    for (const name of readdirSync(join(ENGINE_ROOT, 'checks'))) {
+      if (!name.endsWith('.md')) continue
+      writeFileSync(join(checksDir, name), readFileSync(join(ENGINE_ROOT, 'checks', name)))
+    }
+    created.push('.gatekeeper/checks/')
+  }
+
+  return {
+    ok: true,
+    root,
+    analyzersConfigured: existsSync(join(root, '.gatekeeper', 'analyzers.mjs')),
+    created,
+    message: created.length ? `scaffolded ${created.join(', ')}` : '.gatekeeper/ already configured — nothing to scaffold',
+  }
+}
+
+// The deterministic half of a review, in one call. Judging the diff still requires an AI
+// agent to run the returned `agents` prompts and verify their findings; see the skill.
+async function cmdReview(flags) {
+  const prep = await cmdPrepare(flags)
+  if (prep.empty) return prep
+
+  const ctx = await cmdContext({ ...flags, run: prep.runDir })
+  return {
+    ok: true,
+    runDir: prep.runDir,
+    mode: prep.mode,
+    files: prep.files,
+    wide: prep.wide,
+    checksToRun: prep.checksToRun,
+    gatedOut: prep.gatedOut,
+    evidence: ctx.results,
+    neighborhood: ctx.neighborhood,
+    ci: ctx.ci,
+    agents: ctx.agents,
+    next: 'Deterministic stages only: diff captured, checks gated, analyzers run. An AI agent must now run each entry in `agents`, then `gk parse` and `gk rank` to verify and report findings — see the gatekeeper skill.',
+  }
 }
 
 function requireRunDir(flags) {
@@ -572,6 +621,8 @@ function requireRunDir(flags) {
 }
 
 const COMMANDS = {
+  init: cmdInit,
+  review: cmdReview,
   prepare: cmdPrepare,
   context: cmdContext,
   parse: cmdParse,
@@ -583,9 +634,26 @@ const COMMANDS = {
 const { flags, positional } = parseArgs(process.argv.slice(2))
 const command = positional[0]
 
+if (flags.version) {
+  const pkg = JSON.parse(readFileSync(join(ENGINE_ROOT, 'package.json'), 'utf8'))
+  out({ ok: true, version: pkg.version })
+  process.exit(0)
+}
+
 if (!command || command === 'help' || flags.help) {
   process.stdout.write(
     `gk — Gatekeeper deterministic engine
+
+  gk init
+      Scaffold .gatekeeper/checks/ from the bundled templates if it does not already
+      exist. Never overwrites an existing config. Safe to re-run from any project,
+      in any language — checks are plain-language prompts, not language-specific code.
+
+  gk review [--pr <url|number>] [--base <ref>] [--checks a,b] [--deep]
+      Run the full deterministic pipeline in one call: prepare + context. Captures
+      the diff, gates checks by applies_to, runs analyzers, and writes one review
+      prompt per agent. Judging the diff still requires an AI agent to run the
+      returned prompts, then \`gk parse\` + \`gk rank\`.
 
   gk prepare [--pr <url|number>] [--base <ref>]
       Resolve the review target, capture the diff, build the manifest, gate checks
@@ -610,6 +678,9 @@ if (!command || command === 'help' || flags.help) {
 
   gk cleanup [--run <dir>] [--now <ISO>] [--keep-days 30]
       Remove worktrees and prune old runs. Never touches dismissals or cache.
+
+  gk --version
+      Print the installed engine version.
 `
   )
   process.exit(0)
@@ -618,7 +689,8 @@ if (!command || command === 'help' || flags.help) {
 if (!COMMANDS[command]) fail(`unknown command: ${command}`)
 
 try {
-  await COMMANDS[command](flags)
+  const result = await COMMANDS[command](flags)
+  if (result) out(result)
 } catch (err) {
   fail(err.message, { stack: process.env.GK_DEBUG ? err.stack : undefined })
 }
