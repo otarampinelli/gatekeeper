@@ -39,9 +39,9 @@ Scope is strictly limited to code touched by the current diff:
 - Do not ask for tests in unrelated files, modules, or historical code paths
 - If a touched file has adjacent legacy logic, only comment on the changed behavior
 
-This repository is a monorepo and different areas use different test stacks.
-Treat coverage as satisfied when the change is covered by the most appropriate
-test type for that code path.
+Different areas of a repo may use different test stacks. Treat coverage as
+satisfied when the change is covered by the most appropriate test type for
+that code path.
 Do not require every change to include both unit and e2e tests.
 
 Fail the check when meaningful behavior introduced or changed by the diff is not

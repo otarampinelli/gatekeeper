@@ -56,6 +56,7 @@ node --test '.gatekeeper/test/*.test.mjs'
 - `--deep` — also run analyzers marked `deep: true` (slow ones: full typechecks, tests)
 - `--no-verify` — skip verification (faster, noisier; the summary says so)
 - `--fresh` — ignore previously dismissed findings
+- `--base <ref>` — override the local-mode base revision (default: merge-base with the default branch)
 
 ---
 
@@ -238,122 +239,11 @@ If nothing is reported, say so plainly and go to step 10.
 
 ### 9. Report
 
-#### 9a. GitHub PR mode
+`rank` returned `mode` and `reportGuide` — read only the file `reportGuide` names, not
+whatever you recall from step 1.
 
-PR mode is an external review. Treat the PR as someone else's work: never offer to fix it
-locally, never show the per-finding "Fix it" / "Skip" cards.
-
-Build planned inline comments from `reported.json` for every finding that anchors to a
-changed line, render them exactly as they will be posted, then ask:
-
-- **Post all inline PR comments** — post every planned comment as previewed
-- **Choose comments** — one checkbox per comment, post only those
-- **Stop** — leave the PR untouched
-
-No top-level summary comment. Only post comments that anchor to a changed line; report
-unanchorable findings in chat. Build diff blocks from the finding's stored `diff` — do not
-re-read files.
-
-````markdown
-🛡️ **Gatekeeper** flagged this via `<check name>`.
-
-**<short finding title>**
-
-<one concise explanation of the problem>
-
-<the evidence line verification confirmed>
-
-Suggested fix: <one concise explanation of how to solve it>
-
-<details>
-<summary>Proposed fix</summary>
-
-```diff
-- <old code>
-+ <new code>
-```
-
-</details>
-````
-
-Design and non-code findings use the same body without the `<details>` block.
-
-```bash
-gh pr view <pr-url> --json number,headRefOid
-```
-
-```bash
-gh api repos/<owner>/<repo>/pulls/<number>/comments \
-  -f body="$(cat <<'EOF'
-<body from above>
-EOF
-)" \
-  -f commit_id="<headRefOid>" \
-  -f path="<file-path>" \
-  -F line=<changed-line-number> \
-  -f side=RIGHT
-```
-
-#### 9b. Local mode triage
-
-Triage one finding at a time — each distinct problem gets its own AskUserQuestion item.
-
-Everything you need is in `reported.json`: explanation, evidence, fix, and diff. No file
-re-reads.
-
-**Print the cards in a normal chat message FIRST, then ask.** AskUserQuestion renders its
-text as plain text, so ```diff fences get no red/green colouring inside the widget. The
-polished version belongs in your message; the widget stays a thin control.
-
-1. One card per finding, `---` divider after each:
-
-   ````
-   ### 🔴 Hardcoded DB password
-   `src/api/app.module.ts:925` · confirmed · flagged by Security Review + Code Quality
-
-   Password is committed in source instead of read from the environment.
-
-   Evidence: app.module.ts:925 passes a literal; no env fallback in this module.
-
-   ```diff
-   -     password: '1223456789',
-   +     password: process.env.PG_PASSWORD,
-   ```
-   ---
-   ````
-
-   Severity emoji: 🔴 Error, 🟡 Warning, 🔵 Info. Label unproven findings as unproven on
-   the context line.
-
-2. Then AskUserQuestion, structured so the suggestion is visible:
-
-   ```
-   1. Hardcoded DB password at app.module.ts:925
-
-   Switch to process.env.PG_PASSWORD?
-
-   -     password: '1223456789',
-   +     password: process.env.PG_PASSWORD,
-   ```
-
-   - Header: `<file> — flagged by <check(s)>`
-   - Exactly two options. Do NOT add a custom/"reply in chat" option — AskUserQuestion
-     already provides a built-in "Other: (type to answer)".
-     - **Fix it** — apply the suggestion
-     - **Skip** — leave it, and record the dismissal
-   - Honour a custom instruction given via "Other".
-
-Batch up to 4 per call. Print all cards for the batch, then ask together. Only edit
-changed files; never touch pre-existing issues in unchanged code.
-
-For every finding the user skipped, record it so it is never asked again:
-
-```bash
-node .gatekeeper/bin/gk.mjs dismiss --run <runDir> --id F02,F05 --date <YYYY-MM-DD>
-```
-
-`--date` is required: the engine has no trusted clock, so pass today's date from your
-context.
+- **local:** read and follow [`local-report.md`](./reports/local-report.md).
+- **pr:** read and follow [`pr-report.md`](./reports/pr-report.md).
 
 ### 10. Clean up
 
@@ -372,10 +262,9 @@ command the user should run.
 ## Design Notes
 
 - Everything Gatekeeper owns lives under `.gatekeeper/`: the engine (`bin/`, `lib/`), its
-  tests (`test/`), the policy (`checks/`, `analyzers.mjs`), and these skill definitions
-  (`skills/`). `.agents/skills/*` and `.claude/skills/*` are symlinks into `skills/` so
-  each agent harness discovers the skill without owning a second copy. Copying
-  `.gatekeeper/` into another repo brings the whole reviewer with it.
+  tests (`test/`), the policy (`checks/`, `analyzers.mjs`), and this skill plus
+  `writing-checks/` (the authoring skill). Copying `.gatekeeper/` into another repo brings
+  the whole reviewer with it.
 - Inside that directory the engine/policy split still holds. `bin/` and `lib/` are generic
   and know nothing about this repo; `checks/` and `analyzers.mjs` are entirely
   repo-specific. Deleting a check or `analyzers.mjs` degrades a review without breaking the

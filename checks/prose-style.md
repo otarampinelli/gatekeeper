@@ -6,7 +6,7 @@ applies_to:
   - "**/*.mdx"
 hints:
   - Use when a change adds or rewords documentation, specs, or long-form agent instructions.
-  - docs under apps/documentation/content/docs
+  - docs under a docs/ or documentation directory
   - specs/
   - CLAUDE.md / AGENTS.md long-form sections
   - a reworded or restructured page
@@ -15,10 +15,9 @@ hints:
 
 Review changed markdown prose for writing-standard violations.
 
-This check applies to prose under `apps/documentation/content/docs/`, `specs/`, and the
-long-form sections of `CLAUDE.md` / `AGENTS.md` files. The standard is the "Writing
-standard: Simplified Technical English" section of `.cursor/rules/docs-update.mdc`. Read it
-before judging prose.
+This check applies to prose under the repo's docs directory (`docs/`, `documentation/`, or
+similar), `specs/`, and the long-form sections of `CLAUDE.md` / `AGENTS.md` files. The
+Simplified Technical English rules below are the standard — judge against them directly.
 
 Fail the check if changed or added prose does any of these:
 

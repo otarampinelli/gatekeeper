@@ -54,7 +54,7 @@ Do not fail the check for:
 When you flag something, quote or paraphrase the specific claim, state what the diff does
 instead, and say which of the two should change: implement the missing behavior, or restate
 the intent to match what shipped. Prefer "the description says the lead form submits to the
-intake endpoint, but the handler in `apps/legalsupportgroup/.../LeadForm.vue` resolves without
+intake endpoint, but the handler in `src/components/LeadForm.vue` resolves without
 calling it" over a general note about scope.
 
 If the diff delivers what it claims, and claims what it delivers, pass the check.

@@ -13,9 +13,8 @@ hints:
 Review the diff for "AI slop" — low-signal filler that bloats the code without adding
 value. This is code that looks plausible but a careful human wouldn't have written.
 
-This check owns **noise**. Structural over-engineering belongs to Simplicity, duplicated
-implementations belong to Reuse First, and documentation prose belongs to Prose Style. Do
-not re-flag those here.
+This check owns **noise**. Structural over-engineering belongs to Simplicity, and
+documentation prose belongs to Prose Style. Do not re-flag those here.
 
 Fail the check if any of these are true:
 

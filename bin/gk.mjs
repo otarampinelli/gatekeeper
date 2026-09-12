@@ -1,15 +1,7 @@
 #!/usr/bin/env node
-// Gatekeeper deterministic engine.
-//
-// Every subcommand prints a compact JSON result to stdout and writes bulk artifacts to
-// disk. That split is the point: the orchestrating model reads a few lines instead of
-// pulling manifests, analyzer logs, and review text through its context.
-//
-// Judgment stays with the model — intent inference, the reviews themselves, verification
-// reasoning, and triage. This engine only does work that has one correct answer, which
-// includes filling in the agent prompts.
+// Every subcommand prints compact JSON to stdout and writes bulk output to disk, so the
+// orchestrating model reads results instead of pulling logs and diffs through its context.
 
-import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
@@ -20,9 +12,10 @@ import {
   addWorktree,
   removeWorktree,
   git,
+  gh,
   defaultBranchRef,
 } from '../lib/git.mjs'
-import { loadPolicy, loadChecks, groupChecks, toPathspec } from '../lib/policy.mjs'
+import { loadPolicy, loadChecks, groupChecks, selectChecks } from '../lib/policy.mjs'
 import { buildManifest, renderManifest, captureLog } from '../lib/manifest.mjs'
 import { runAnalyzers, renderEvidence, fetchCiEvidence } from '../lib/analyzers.mjs'
 import { buildNeighborhood, renderNeighborhood } from '../lib/neighborhood.mjs'
@@ -38,9 +31,7 @@ import {
   renderSummary,
 } from '../lib/findings.mjs'
 
-// Above this the full check set is too expensive to select by default. The engine reports
-// the fact; the skill is what refuses. A repo-wide sweep touches every gated path, so
-// gating cannot help and only a named subset can.
+// Above this, the full check set is too expensive to select by default.
 const WIDE_PATCH_TOKENS = 20000
 
 function out(obj) {
@@ -95,15 +86,14 @@ async function cmdPrepare(flags) {
   let prMeta = null
 
   if (flags.pr) {
-    if (!spawnSyncOk('gh', ['--version'])) fail('the GitHub CLI (gh) is not installed')
-    if (!spawnSyncOk('gh', ['auth', 'status'])) fail('gh is not authenticated — run `gh auth login`')
+    if (!(await gh(['--version'])).ok) fail('the GitHub CLI (gh) is not installed')
+    if (!(await gh(['auth', 'status'])).ok) fail('gh is not authenticated — run `gh auth login`')
 
-    const view = spawnSync(
-      'gh',
+    const view = await gh(
       ['pr', 'view', String(flags.pr), '--json', 'number,headRefOid,baseRefName,title,body,url'],
-      { encoding: 'utf8', cwd: root }
+      { cwd: root }
     )
-    if (view.status !== 0) fail(`cannot read PR: ${(view.stderr || '').trim()}`)
+    if (!view.ok) fail(`cannot read PR: ${view.stderr.trim()}`)
     prMeta = JSON.parse(view.stdout)
     prNumber = prMeta.number
     mode = 'pr'
@@ -135,141 +125,125 @@ async function cmdPrepare(flags) {
     baseHow = resolved.how
   }
 
-  const manifest = buildManifest({
-    cwd: reviewRoot,
-    base,
-    head,
-    exclude: policy.diffExclude,
-    mode,
-    reviewRoot,
-    prNumber,
-  })
-
-  if (!manifest.files.length) {
-    if (worktree) removeWorktree(worktree, root)
-    return out({
-      ok: true,
-      empty: true,
+  try {
+    const manifest = buildManifest({
+      cwd: reviewRoot,
+      base,
+      head,
+      exclude: policy.diffExclude,
       mode,
+      reviewRoot,
+      prNumber,
+    })
+
+    if (!manifest.files.length) {
+      if (worktree) removeWorktree(worktree, root)
+      return out({
+        ok: true,
+        empty: true,
+        mode,
+        base,
+        baseHow,
+        message: 'no changes to review',
+      })
+    }
+
+    const runId = mode === 'pr' ? `pr-${prNumber}-${String(head).slice(0, 8)}` : `local-${base.slice(0, 8)}`
+    const runDir = join(stateRoot(root), 'runs', runId)
+
+    // Re-run reuses the same run dir, so clear per-pass artifacts or `gk parse` reads the
+    // previous pass's candidates. cache/ and dismissals.json are keyed by content and survive.
+    for (const sub of ['candidates', 'verdicts', 'prompts']) {
+      rmSync(join(runDir, sub), { recursive: true, force: true })
+      mkdirSync(join(runDir, sub), { recursive: true })
+    }
+    for (const stale of ['candidates.json', 'reported.json', 'summary.md']) {
+      rmSync(join(runDir, stale), { force: true })
+    }
+
+    writeFileSync(join(runDir, 'diff.patch'), manifest.patch)
+    writeFileSync(join(runDir, 'manifest.md'), renderManifest(manifest))
+    const { patch: _patch, ...manifestJson } = manifest
+    writeFileSync(join(runDir, 'manifest.json'), JSON.stringify(manifestJson, null, 2))
+
+    writeFileSync(join(runDir, 'log.txt'), captureLog({ cwd: reviewRoot, base, head }))
+
+    // applies_to gating: policy is always read from the MAIN repo, never from a PR
+    // worktree, since review policy belongs to this repo, not to the PR author.
+    const checks = loadChecks(root)
+    const { selected, gated } = selectChecks(checks, manifest.files.map((f) => f.path))
+
+    const patchTokens = Math.round(manifest.patch.length / 4)
+    const groups = groupChecks(selected)
+
+    const meta = {
+      runId,
+      runDir,
+      mode,
+      reviewRoot,
+      repoRoot: root,
       base,
       baseHow,
-      message: 'no changes to review',
-    })
-  }
-
-  const runId = mode === 'pr' ? `pr-${prNumber}-${String(head).slice(0, 8)}` : `local-${base.slice(0, 8)}`
-  const runDir = join(stateRoot(root), 'runs', runId)
-
-  // The run id is stable for a given base, so a re-run after fixing findings lands in the
-  // same directory. Clear the per-pass artifacts: leaving them would make `gk parse` read
-  // the previous pass's candidates and verdicts as if they described the current diff.
-  // cache/ and dismissals.json live outside the run and are keyed by content, so they
-  // correctly survive.
-  for (const sub of ['candidates', 'verdicts', 'prompts']) {
-    rmSync(join(runDir, sub), { recursive: true, force: true })
-    mkdirSync(join(runDir, sub), { recursive: true })
-  }
-  for (const stale of ['candidates.json', 'reported.json', 'summary.md']) {
-    rmSync(join(runDir, stale), { force: true })
-  }
-
-  writeFileSync(join(runDir, 'diff.patch'), manifest.patch)
-  writeFileSync(join(runDir, 'manifest.md'), renderManifest(manifest))
-  const { patch: _patch, ...manifestJson } = manifest
-  writeFileSync(join(runDir, 'manifest.json'), JSON.stringify(manifestJson, null, 2))
-
-  writeFileSync(join(runDir, 'log.txt'), captureLog({ cwd: reviewRoot, base, head }))
-
-  // applies_to gating: policy is always read from the MAIN repo, never from a PR
-  // worktree — review policy belongs to this repo, not to the PR author.
-  const checks = loadChecks(root)
-  const changed = new Set(manifest.files.map((f) => f.path))
-  const selected = []
-  const gated = []
-  for (const c of checks) {
-    if (!c.appliesTo) {
-      selected.push(c)
-      continue
+      head: head ?? 'working tree',
+      prNumber,
+      prTitle: prMeta?.title ?? null,
+      prUrl: prMeta?.url ?? null,
+      prBaseRef: prMeta?.baseRefName ?? null,
+      worktree,
+      stateDir: stateRoot(root),
+      policyPresent: policy.present,
+      files: manifest.files.length,
+      churn: manifest.churn,
+      patchTokens,
+      checks: selected.map((c) => ({
+        stem: c.stem,
+        name: c.name,
+        path: c.path,
+        description: c.description,
+        hints: c.hints,
+        group: c.group,
+        bytes: c.bytes,
+      })),
+      gatedOut: gated.map((c) => c.stem),
     }
-    const args = ['diff', '--name-only', ...(head ? [base, head] : [base]), '--', ...toPathspec(c.appliesTo)]
-    const r = git(args, { cwd: reviewRoot, allowFail: true })
-    const matches = r.ok && r.stdout.split('\n').some((p) => p && changed.has(p))
-    ;(matches ? selected : gated).push(c)
+    writeRunMeta(runDir, meta)
+
+    out({
+      ok: true,
+      empty: false,
+      runDir,
+      mode,
+      reviewRoot,
+      base,
+      baseHow,
+      head: meta.head,
+      prNumber,
+      prTitle: prMeta?.title ?? null,
+      files: manifest.files.length,
+      byClass: countBy(manifest.files, (f) => f.class),
+      churn: manifest.churn,
+      renames: manifest.renames.length,
+      changedDeclarations: manifest.declarations.length,
+      patchTokens,
+      // A wide diff is expensive no matter how it's grouped; ask for a named subset instead.
+      wide: patchTokens > WIDE_PATCH_TOKENS,
+      checksToRun: selected.map((c) => c.stem),
+      agents: groups.length,
+      groups: groups.map((g) => ({ id: g.id, checks: g.checks.map((c) => c.stem) })),
+      gatedOut: gated.map((c) => c.stem),
+      artifacts: {
+        manifest: join(runDir, 'manifest.md'),
+        diff: join(runDir, 'diff.patch'),
+        log: join(runDir, 'log.txt'),
+        candidatesDir: join(runDir, 'candidates'),
+        verdictsDir: join(runDir, 'verdicts'),
+        promptsDir: join(runDir, 'prompts'),
+      },
+    })
+  } catch (err) {
+    if (worktree) removeWorktree(worktree, root)
+    throw err
   }
-
-  const patchTokens = Math.round(manifest.patch.length / 4)
-  const groups = groupChecks(selected)
-
-  const meta = {
-    runId,
-    runDir,
-    mode,
-    reviewRoot,
-    repoRoot: root,
-    base,
-    baseHow,
-    head: head ?? 'working tree',
-    prNumber,
-    prTitle: prMeta?.title ?? null,
-    prUrl: prMeta?.url ?? null,
-    prBaseRef: prMeta?.baseRefName ?? null,
-    worktree,
-    stateDir: stateRoot(root),
-    policyPresent: policy.present,
-    files: manifest.files.length,
-    churn: manifest.churn,
-    patchTokens,
-    checks: selected.map((c) => ({
-      stem: c.stem,
-      name: c.name,
-      path: c.path,
-      description: c.description,
-      hints: c.hints,
-      group: c.group,
-      bytes: c.bytes,
-    })),
-    gatedOut: gated.map((c) => c.stem),
-  }
-  writeRunMeta(runDir, meta)
-
-  out({
-    ok: true,
-    empty: false,
-    runDir,
-    mode,
-    reviewRoot,
-    base,
-    baseHow,
-    head: meta.head,
-    prNumber,
-    prTitle: prMeta?.title ?? null,
-    files: manifest.files.length,
-    byClass: countBy(manifest.files, (f) => f.class),
-    churn: manifest.churn,
-    renames: manifest.renames.length,
-    changedDeclarations: manifest.declarations.length,
-    patchTokens,
-    // A wide diff makes the full check set expensive no matter how it is grouped, and
-    // gating cannot help when a sweep touches every path. Ask for a named subset instead.
-    wide: patchTokens > WIDE_PATCH_TOKENS,
-    checksToRun: selected.map((c) => c.stem),
-    agents: groups.length,
-    groups: groups.map((g) => ({ id: g.id, checks: g.checks.map((c) => c.stem) })),
-    gatedOut: gated.map((c) => c.stem),
-    artifacts: {
-      manifest: join(runDir, 'manifest.md'),
-      diff: join(runDir, 'diff.patch'),
-      log: join(runDir, 'log.txt'),
-      candidatesDir: join(runDir, 'candidates'),
-      verdictsDir: join(runDir, 'verdicts'),
-      promptsDir: join(runDir, 'prompts'),
-    },
-  })
-}
-
-function spawnSyncOk(cmd, args) {
-  const r = spawnSync(cmd, args, { encoding: 'utf8' })
-  return !r.error && r.status === 0
 }
 
 function countBy(items, fn) {
@@ -281,9 +255,8 @@ function countBy(items, fn) {
   return m
 }
 
-// Evidence, reference map, and the review prompts in one pass. They always ran back to
-// back, neither read the other's output, and splitting them cost the orchestrator an extra
-// round trip and an extra JSON result for no decision it could act on in between.
+// Evidence, reference map, and prompts run in one pass: they always ran back to back, and
+// splitting them cost an extra round trip for no decision made in between.
 async function cmdContext(flags) {
   const runDir = requireRunDir(flags)
   const meta = runMeta(runDir)
@@ -292,7 +265,7 @@ async function cmdContext(flags) {
   const head = meta.head === 'working tree' ? null : meta.head
 
   // Selection happens between `prepare` and here, so this is the first point at which the
-  // final check set — and therefore the prompt set — is known.
+  // final check set, and therefore the prompt set, is known.
   let selected = meta.checks
   if (flags.checks) {
     const want = String(flags.checks).split(',').map((s) => s.trim()).filter(Boolean)
@@ -310,7 +283,7 @@ async function cmdContext(flags) {
   // becomes a settled one, and freezing "in progress" would defeat that.
   const ci =
     meta.mode === 'pr'
-      ? fetchCiEvidence({
+      ? await fetchCiEvidence({
           cwd: meta.repoRoot,
           headSha: head,
           baseRef: meta.prBaseRef,
@@ -488,6 +461,8 @@ function cmdRank(flags) {
 
   out({
     ok: true,
+    mode: meta.mode,
+    reportGuide: meta.mode === 'pr' ? 'reports/pr-report.md' : 'reports/local-report.md',
     summary,
     reported: reported.map((f) => ({
       id: f.id,
@@ -512,6 +487,7 @@ function cmdRank(flags) {
 function cmdDismiss(flags) {
   const runDir = requireRunDir(flags)
   const meta = runMeta(runDir)
+  if (meta.mode !== 'local') fail('dismiss only applies to local-mode runs')
   const ids = String(flags.id ?? '')
     .split(',')
     .map((s) => s.trim())
@@ -542,9 +518,8 @@ function cmdCleanup(flags) {
   const state = stateRoot(root)
   const results = { worktreesRemoved: [], runsPruned: [], warnings: [] }
 
-  // Remove every gatekeeper worktree, not just this run's. A crashed run leaves one
-  // behind, and a leaked worktree keeps a stale checkout on disk and dirties
-  // `git worktree list` in the user's repo.
+  // Remove every gatekeeper worktree, not just this run's: a crashed run leaves one
+  // behind and it dirties `git worktree list` in the user's repo.
   const wtRoot = join(state, 'worktrees')
   if (existsSync(wtRoot)) {
     for (const name of readdirSync(wtRoot)) {
@@ -631,7 +606,7 @@ if (!command || command === 'help' || flags.help) {
       Apply verdicts from verdicts/, drop dismissed findings, rank, emit summary.
 
   gk dismiss --run <dir> --id F01[,F02] --date YYYY-MM-DD
-      Remember a Skip so it is never asked again.
+      Remember a Skip so it is never asked again. Local mode only.
 
   gk cleanup [--run <dir>] [--now <ISO>] [--keep-days 30]
       Remove worktrees and prune old runs. Never touches dismissals or cache.

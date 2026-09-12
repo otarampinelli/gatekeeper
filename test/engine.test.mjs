@@ -1,10 +1,17 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-import { churn } from '../lib/manifest.mjs'
-import { parseFrontmatter, groupChecks } from '../lib/policy.mjs'
+import { churn, declarations } from '../lib/manifest.mjs'
+import { parseFrontmatter, groupChecks, selectChecks } from '../lib/policy.mjs'
 import { batch } from '../lib/prompts.mjs'
 import { parseCandidateFile, parseVerdict, rank, fingerprint } from '../lib/findings.mjs'
+
+const GK = fileURLToPath(new URL('../bin/gk.mjs', import.meta.url))
 
 test('churn counts content present on both sides as a move', () => {
   const patch = ['--- a/x.ts', '+++ b/x.ts', '-const a = 1', '-const b = 2', '+const a = 1', '+const b = 2'].join('\n')
@@ -29,6 +36,36 @@ test('churn counts a real rewrite as no move at all', () => {
 test('churn matches a moved line only once per occurrence', () => {
   const patch = ['--- a/x.ts', '+++ b/x.ts', '-dup', '+dup', '+dup'].join('\n')
   assert.deepEqual(churn(patch), { added: 2, removed: 1, identical: 1 })
+})
+
+test('declarations reads an added exported function', () => {
+  const patch = ['--- a/x.ts', '+++ b/x.ts', '+export function foo() {}'].join('\n')
+  assert.deepEqual(declarations(patch), [
+    { sign: '+', exported: true, kind: 'function', name: 'foo', file: 'x.ts' },
+  ])
+})
+
+test('declarations ignores a removed and a non-exported declaration', () => {
+  const patch = ['--- a/x.ts', '+++ b/x.ts', '-export function foo() {}', '+const bar = 1'].join('\n')
+  const d = declarations(patch)
+  assert.equal(d.length, 2)
+  assert.equal(d[0].sign, '-')
+  assert.equal(d[1].exported, false)
+})
+
+test('declarations attributes each hunk to the file it follows', () => {
+  const patch = [
+    '--- a/a.ts',
+    '+++ b/a.ts',
+    '+export const A = 1',
+    '--- a/b.ts',
+    '+++ b/b.ts',
+    '+export const B = 2',
+  ].join('\n')
+  assert.deepEqual(declarations(patch).map((d) => [d.file, d.name]), [
+    ['a.ts', 'A'],
+    ['b.ts', 'B'],
+  ])
 })
 
 test('parseCandidateFile reads a passing check', () => {
@@ -93,8 +130,8 @@ test('parseCandidateFile keeps the proposed diff out of the claim', () => {
     '```',
   ].join('\n')
 
-  // The explanation is what a verifier is asked to refute, so diff body lines — which do
-  // not start with "- " and so survive the bullet filter — must not leak into it.
+  // The explanation is what a verifier is asked to refute, so diff body lines (which do
+  // not start with "- " and so survive the bullet filter) must not leak into it.
   const [f] = parseCandidateFile(text, 'simplicity').findings
   assert.equal(f.explanation, 'The helper only forwards its argument.')
   assert.match(f.diff, /call inner directly/)
@@ -385,6 +422,37 @@ test('groupChecks reports the combined byte weight of each agent', () => {
   assert.equal(group.bytes, 350)
 })
 
+test('selectChecks always selects a check with no applies_to', () => {
+  const { selected, gated } = selectChecks([{ stem: 'a', appliesTo: null }], ['x.ts'])
+  assert.deepEqual(selected.map((c) => c.stem), ['a'])
+  assert.deepEqual(gated, [])
+})
+
+test('selectChecks gates out a check whose globs match no changed file', () => {
+  const { selected, gated } = selectChecks([{ stem: 'docs', appliesTo: ['**/*.md'] }], ['src/index.ts'])
+  assert.deepEqual(selected, [])
+  assert.deepEqual(gated.map((c) => c.stem), ['docs'])
+})
+
+test('selectChecks matches a leading globstar against a file with no directory', () => {
+  const { selected } = selectChecks([{ stem: 'docs', appliesTo: ['**/*.md'] }], ['README.md'])
+  assert.deepEqual(selected.map((c) => c.stem), ['docs'])
+})
+
+test('selectChecks matches a trailing globstar at any depth, but not an unrelated path', () => {
+  const c = { stem: 'convex', appliesTo: ['convex/**'] }
+  assert.equal(selectChecks([c], ['convex/a.ts']).selected.length, 1)
+  assert.equal(selectChecks([c], ['convex/a/b.ts']).selected.length, 1)
+  assert.equal(selectChecks([c], ['other/a.ts']).selected.length, 0)
+})
+
+test('selectChecks matches a middle globstar with zero or more intervening directories', () => {
+  const c = { stem: 'apps', appliesTo: ['apps/**/*.ts'] }
+  assert.equal(selectChecks([c], ['apps/x.ts']).selected.length, 1)
+  assert.equal(selectChecks([c], ['apps/a/b/x.ts']).selected.length, 1)
+  assert.equal(selectChecks([c], ['apps/x.js']).selected.length, 0)
+})
+
 test('batch splits findings into verifier-sized groups and loses none', () => {
   const ids = Array.from({ length: 12 }, (_, i) => i + 1)
   const groups = batch(ids, 5)
@@ -394,4 +462,220 @@ test('batch splits findings into verifier-sized groups and loses none', () => {
 
 test('batch of nothing is nothing', () => {
   assert.deepEqual(batch([], 5), [])
+})
+
+function initRepo() {
+  const dir = mkdtempSync(join(tmpdir(), 'gk-test-'))
+  const run = (args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' })
+  run(['init', '-q', '-b', 'main'])
+  run(['config', 'user.email', 'test@test.com'])
+  run(['config', 'user.name', 'Test'])
+  writeFileSync(join(dir, 'a.txt'), 'one\n')
+  run(['add', '.'])
+  run(['commit', '-q', '-m', 'init'])
+  return dir
+}
+
+test('gk prepare (local mode) reports the changed file and writes run state', () => {
+  const dir = initRepo()
+  writeFileSync(join(dir, 'a.txt'), 'one\ntwo\n')
+  const res = JSON.parse(execFileSync('node', [GK, 'prepare'], { cwd: dir, encoding: 'utf8' }))
+  assert.equal(res.ok, true)
+  assert.equal(res.mode, 'local')
+  assert.equal(res.files, 1)
+})
+
+test('gk prepare (local mode) reports empty when there is nothing to review', () => {
+  const dir = initRepo()
+  const res = JSON.parse(execFileSync('node', [GK, 'prepare'], { cwd: dir, encoding: 'utf8' }))
+  assert.equal(res.ok, true)
+  assert.equal(res.empty, true)
+  assert.equal(res.mode, 'local')
+})
+
+test('gk context (local mode) omits the ci block', () => {
+  const dir = initRepo()
+  writeFileSync(join(dir, 'a.txt'), 'one\ntwo\n')
+  const prep = JSON.parse(execFileSync('node', [GK, 'prepare'], { cwd: dir, encoding: 'utf8' }))
+  const ctx = JSON.parse(
+    execFileSync('node', [GK, 'context', '--run', prep.runDir], { cwd: dir, encoding: 'utf8' })
+  )
+  assert.equal(ctx.ok, true)
+  assert.equal('ci' in ctx, false)
+})
+
+test('gk rank reports the mode and matching report guide', () => {
+  const dir = initRepo()
+  writeFileSync(join(dir, 'a.txt'), 'one\ntwo\n')
+  const prep = JSON.parse(execFileSync('node', [GK, 'prepare'], { cwd: dir, encoding: 'utf8' }))
+  mkdirSync(join(prep.runDir, 'candidates'), { recursive: true })
+  writeFileSync(join(prep.runDir, 'candidates', 'test-check.md'), 'RESULT: PASS\nAll good.\n')
+  execFileSync('node', [GK, 'parse', '--run', prep.runDir], { cwd: dir })
+  const res = JSON.parse(
+    execFileSync('node', [GK, 'rank', '--run', prep.runDir], { cwd: dir, encoding: 'utf8' })
+  )
+  assert.equal(res.mode, 'local')
+  assert.equal(res.reportGuide, 'reports/local-report.md')
+})
+
+function fakeRun(mode) {
+  const dir = mkdtempSync(join(tmpdir(), 'gk-run-'))
+  const runDir = join(dir, 'run')
+  mkdirSync(runDir, { recursive: true })
+  writeFileSync(join(runDir, 'run.json'), JSON.stringify({ mode, stateDir: dir }))
+  writeFileSync(
+    join(runDir, 'reported.json'),
+    JSON.stringify([{ id: 'F01', fingerprint: 'fp1', title: 'Something', file: 'a.ts', checks: ['x'] }])
+  )
+  return runDir
+}
+
+test('gk dismiss refuses a PR-mode run', () => {
+  const runDir = fakeRun('pr')
+  const res = spawnSync('node', [GK, 'dismiss', '--run', runDir, '--id', 'F01', '--date', '2026-01-01'], {
+    encoding: 'utf8',
+  })
+  const json = JSON.parse(res.stdout)
+  assert.equal(json.ok, false)
+  assert.equal(res.status, 1)
+})
+
+test('gk dismiss succeeds on a local-mode run', () => {
+  const runDir = fakeRun('local')
+  const res = spawnSync('node', [GK, 'dismiss', '--run', runDir, '--id', 'F01', '--date', '2026-01-01'], {
+    encoding: 'utf8',
+  })
+  const json = JSON.parse(res.stdout)
+  assert.equal(json.ok, true)
+  assert.equal(json.dismissed.length, 1)
+})
+
+function writeFakeGh(binDir) {
+  mkdirSync(binDir, { recursive: true })
+  const script = `#!/bin/bash
+DIR="$(cd "$(dirname "$0")" && pwd)"
+case "$1" in
+  --version)
+    [ -f "$DIR/version-fail" ] && exit 1
+    echo "gh version 2.0.0 (fake)"
+    exit 0
+    ;;
+  auth)
+    [ -f "$DIR/auth-fail" ] && exit 1
+    exit 0
+    ;;
+  pr)
+    cat "$DIR/pr-view.json"
+    exit 0
+    ;;
+  api)
+    for a in "$@"; do
+      case "$a" in
+        *check-runs*) cat "$DIR/check-runs.jsonl"; exit 0 ;;
+      esac
+    done
+    exit 1
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`
+  const ghPath = join(binDir, 'gh')
+  writeFileSync(ghPath, script)
+  chmodSync(ghPath, 0o755)
+  writeFileSync(
+    join(binDir, 'check-runs.jsonl'),
+    '{"name":"build","status":"completed","conclusion":"success","details_url":null}\n'
+  )
+}
+
+function prFixture(prNumber) {
+  const dir = initRepo()
+  const run = (args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' })
+
+  const remoteDir = mkdtempSync(join(tmpdir(), 'gk-remote-'))
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main'], { cwd: remoteDir })
+  run(['remote', 'add', 'origin', remoteDir])
+  run(['push', '-q', 'origin', 'main'])
+  run(['fetch', '-q', 'origin', 'main'])
+
+  run(['checkout', '-q', '-b', 'feature'])
+  writeFileSync(join(dir, 'a.txt'), 'one\ntwo\n')
+  run(['add', '.'])
+  run(['commit', '-q', '-m', 'feature change'])
+  const headSha = run(['rev-parse', 'HEAD']).trim()
+  run(['push', '-q', 'origin', `HEAD:refs/pull/${prNumber}/head`])
+  run(['checkout', '-q', 'main'])
+
+  const binDir = mkdtempSync(join(tmpdir(), 'gk-bin-'))
+  writeFakeGh(binDir)
+  writeFileSync(
+    join(binDir, 'pr-view.json'),
+    JSON.stringify({
+      number: prNumber,
+      headRefOid: headSha,
+      baseRefName: 'main',
+      title: 'Feature change',
+      body: '',
+      url: `https://github.com/example/repo/pull/${prNumber}`,
+    })
+  )
+
+  const env = { ...process.env, PATH: `${binDir}:${process.env.PATH}` }
+  return { dir, binDir, headSha, prNumber, env }
+}
+
+test('gk prepare --pr creates an isolated worktree and reports pr mode', () => {
+  const { dir, headSha, prNumber, env } = prFixture(7)
+  const res = JSON.parse(
+    execFileSync('node', [GK, 'prepare', '--pr', String(prNumber)], { cwd: dir, encoding: 'utf8', env })
+  )
+  assert.equal(res.ok, true)
+  assert.equal(res.mode, 'pr')
+  assert.equal(res.prNumber, prNumber)
+  assert.equal(res.head, headSha)
+  assert.equal(res.files, 1)
+  assert.match(res.runDir, new RegExp(`pr-${prNumber}-`))
+  assert.notEqual(res.reviewRoot, dir)
+  assert.equal(existsSync(res.reviewRoot), true)
+
+  execFileSync('node', [GK, 'cleanup'], { cwd: dir, encoding: 'utf8' })
+  assert.equal(existsSync(res.reviewRoot), false)
+})
+
+test('gk context --run <dir> includes the ci block in pr mode', () => {
+  const { dir, prNumber, env } = prFixture(8)
+  const prep = JSON.parse(
+    execFileSync('node', [GK, 'prepare', '--pr', String(prNumber)], { cwd: dir, encoding: 'utf8', env })
+  )
+  const ctx = JSON.parse(
+    execFileSync('node', [GK, 'context', '--run', prep.runDir], { cwd: dir, encoding: 'utf8', env })
+  )
+  assert.equal(ctx.ok, true)
+  assert.equal(ctx.ci.available, true)
+  assert.equal(ctx.ci.total, 1)
+  assert.equal(ctx.ci.ok, 1)
+
+  execFileSync('node', [GK, 'cleanup'], { cwd: dir, encoding: 'utf8' })
+})
+
+test('gk prepare --pr fails when gh is not installed', () => {
+  const { dir, binDir, prNumber, env } = prFixture(9)
+  writeFileSync(join(binDir, 'version-fail'), '')
+  const res = spawnSync('node', [GK, 'prepare', '--pr', String(prNumber)], { cwd: dir, encoding: 'utf8', env })
+  const json = JSON.parse(res.stdout)
+  assert.equal(json.ok, false)
+  assert.match(json.error, /GitHub CLI/)
+  assert.equal(res.status, 1)
+})
+
+test('gk prepare --pr fails when gh is not authenticated', () => {
+  const { dir, binDir, prNumber, env } = prFixture(10)
+  writeFileSync(join(binDir, 'auth-fail'), '')
+  const res = spawnSync('node', [GK, 'prepare', '--pr', String(prNumber)], { cwd: dir, encoding: 'utf8', env })
+  const json = JSON.parse(res.stdout)
+  assert.equal(json.ok, false)
+  assert.match(json.error, /not authenticated/)
+  assert.equal(res.status, 1)
 })
