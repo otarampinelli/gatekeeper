@@ -77,9 +77,7 @@ a Rust or Python repo run through Gatekeeper never gains a `package.json` or
 
 ```bash
 if [ ! -f "$HOME/.gatekeeper/bin/gk.mjs" ]; then
-  git clone --depth 1 https://github.com/otarampinelli/gatekeeper.git "$HOME/.gatekeeper"
-  mkdir -p "$HOME/.local/bin"
-  ln -sf "$HOME/.gatekeeper/bin/gk.mjs" "$HOME/.local/bin/gk"
+  curl -fsSL https://raw.githubusercontent.com/otarampinelli/gatekeeper/main/setup.sh | bash
 fi
 node "$HOME/.gatekeeper/bin/gk.mjs" init
 ```

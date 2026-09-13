@@ -38,19 +38,28 @@ it to drive that engine. Neither one is language-specific: checks are plain-lang
 prompts your agent judges against the diff, not language-specific code, so the same engine
 and the same bundled checks work unchanged in a JavaScript, Python, Rust, or Go repo.
 
-**1. Install the engine globally, once:**
+**1. Install the engine globally (optional — the skill does this for you on first run):**
 
 ```bash
-git clone --depth 1 https://github.com/otarampinelli/gatekeeper.git ~/.gatekeeper
-mkdir -p ~/.local/bin
-ln -sf ~/.gatekeeper/bin/gk.mjs ~/.local/bin/gk
+curl -fsSL https://raw.githubusercontent.com/otarampinelli/gatekeeper/main/setup.sh | bash
 ```
 
-Make sure `~/.local/bin` is on your `PATH`. This never touches the project you're
-reviewing: no `package.json`, no `node_modules/`, no Gatekeeper runtime files land in a
-Rust repo, a Python repo, or anywhere else. (If your shell aliases `gk` to something else —
-oh-my-zsh's git plugin binds it to `gitk` — either drop that alias or invoke
-`~/.gatekeeper/bin/gk.mjs` directly; skills do this automatically.)
+You don't have to run this yourself: the first time `/gatekeeper` runs in any project and
+finds no engine at `~/.gatekeeper`, it runs this exact command automatically (see `SKILL.md`
+step 0) before doing anything else. Run it manually ahead of time only if you also want
+`gk` available for your own direct terminal use before installing any skill, or to update
+an existing install (`git pull` under the hood, so it's safe to re-run any time).
+
+It clones the engine to `~/.gatekeeper` and links `gk` into `~/.local/bin`. It never
+touches the project you're reviewing: no `package.json`, no `node_modules/`, no Gatekeeper
+runtime files land in a Rust repo, a Python repo, or anywhere else. Make sure
+`~/.local/bin` is on your `PATH` — the script warns if it isn't. (If your shell aliases
+`gk` to something else — oh-my-zsh's git plugin binds it to `gitk` — either drop that alias
+or invoke `~/.gatekeeper/bin/gk.mjs` directly; skills do this automatically.)
+
+Already have the repo cloned? Run `./setup.sh` from inside it instead — same script, no
+network fetch needed for the script itself. Override `GATEKEEPER_HOME` or
+`GATEKEEPER_BIN_DIR` if you want either somewhere other than the defaults above.
 
 **2. Install the skill into your AI tool:**
 
@@ -59,11 +68,12 @@ npx skills add otarampinelli/gatekeeper --all
 ```
 
 This drops only skill markdown into your tool's skills folder (`.agents/skills/gatekeeper`,
-`.claude/skills/gatekeeper`, …) — no engine code. The first time you run `/gatekeeper` in a
-project, it runs `gk init`, which scaffolds `.gatekeeper/checks/` from the bundled
-templates if it doesn't already exist (see `SKILL.md` step 0). `.gatekeeper/analyzers.mjs`
-is optional and project-specific; write one yourself, or ask your agent to, once you know
-which tools this project actually uses.
+`.claude/skills/gatekeeper`, …) — no engine code. The first time you run `/gatekeeper`
+anywhere, step 0 installs the engine (running `setup.sh` from step 1, if `~/.gatekeeper`
+isn't there yet) and then runs `gk init`, which scaffolds that project's
+`.gatekeeper/checks/` from the bundled templates if it doesn't already exist.
+`.gatekeeper/analyzers.mjs` is optional and project-specific; write one yourself, or ask
+your agent to, once you know which tools this project actually uses.
 
 Only want the runner? `npx skills add otarampinelli/gatekeeper -s gatekeeper` installs just
 `gatekeeper`, skipping the `writing-checks` authoring skill.
@@ -228,6 +238,7 @@ checks/*.md                 # bundled, language-agnostic check templates gk init
 bin/gk.mjs                  # the deterministic engine CLI, resolved from its own location
 lib/*.mjs                   # engine internals: diff capture, manifest, gating, findings
 test/*.test.mjs             # unit tests for the engine's pure functions
+setup.sh                    # installs/updates ~/.gatekeeper and links gk onto PATH
 package.json
 README.md
 ```
